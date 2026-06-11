@@ -3,7 +3,7 @@ name: Compilar Mod Supermarket
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch: # Permite-te clicar num botão para compilar manualmente
+  workflow_dispatch:
 
 jobs:
   build:
@@ -13,19 +13,17 @@ jobs:
     - name: Descarregar o Código Fonte
       uses: actions/checkout@v4
 
-    - name: Configurar o MSBuild (Compilador)
+    - name: Configurar o MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    - name: Criar Pasta de Dependências
-      run: mkdir libs
-
-    - name: Descarregar Bibliotecas do Jogo
+    - name: Organizar Pastas de Dependencias
       run: |
-        # O GitHub vai descarregar as referências públicas do BepInEx para conseguir compilar
-        Invoke-WebRequest -Uri "https://github.com/BepInEx/BepInEx/releases/download/v5.4.22/BepInEx_x64_5.4.22.0.zip" -OutFile "bepinex.zip"
-        Expand-Archive -Path "bepinex.zip" -DestinationPath "bepinex_extracted"
-        copy "bepinex_extracted/BepInEx/core/BepInEx.dll" "libs/"
-        
+        # Caso os arquivos tenham sido upados soltos na raiz, este comando cria a pasta libs e move eles para lá
+        if (Test-Path "Assembly-CSharp.dll") {
+            mkdir libs -Force
+            move *.dll libs/
+        }
+
     - name: Compilar o Mod (.dll)
       run: msbuild ModExportadorPrecios.csproj /p:Configuration=Release
 
@@ -33,4 +31,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: Mod-Estatisticas-Supermarket
-        path: bin/Release/net472/*.dll
+        path: bin/Release/**/ExportadorEstatisticasSupermarket.dll
