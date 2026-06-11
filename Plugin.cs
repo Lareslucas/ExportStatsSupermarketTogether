@@ -1,9 +1,5 @@
 using System;
-using System.IO;
-using System.Text;
 using System.Reflection;
-using System.Globalization;
-using System.Collections.Generic;
 using BepInEx;
 using UnityEngine;
 
@@ -14,100 +10,38 @@ namespace ExportadorEstatisticasSupermarket
     {
         private void Update()
         {
-            // O mod vai disparar a exportação toda vez que você apertar F9 no jogo
             if (Input.GetKeyDown(KeyCode.F9))
             {
-                ExportarDadosParaCSV();
+                EscanearMemoriaDoJogo();
             }
         }
 
-        private void ExportarDadosParaCSV()
+        private void EscanearMemoriaDoJogo()
         {
-            Logger.LogInfo("--- INICIANDO EXPORTAÇÃO COMPLETA DE ESTADO DO MERCADO ---");
-            
-            // CORREÇÃO: Força o salvamento exatamente na raiz da pasta plugins
-            string rotaArquivo = Path.Combine(Paths.PluginPath, "Estatisticas_Mercado.csv");
-            StringBuilder csv = new StringBuilder();
-
-            // Cabeçalho do Banco de Dados Relacional
-            csv.AppendLine("ID_Producto;Nombre;Quantidade_Comprada;Quantidade_Vendida;Estoque_Atual");
-
-            // Carrega a DLL principal do jogo que roda na memória RAM
-            Assembly assemblyJuego = Assembly.Load("Assembly-CSharp");
-            Type tipoCatalogo = assemblyJuego.GetType("ProductListing");
-            Type tipoProgreso = assemblyJuego.GetType("ProgressionManager");
-
-            if (tipoCatalogo == null || tipoProgreso == null)
+            Logger.LogInfo("=== INICIANDO ESCANER DE MEMÓRIA (CAÇA-CLASSES) ===");
+            try
             {
-                Logger.LogError("Erro crítico: Classes nativas do jogo não encontradas na memória.");
-                return;
-            }
-
-            // Encontra os objetos ativos na partida atual
-            UnityEngine.Object catalogoObj = UnityEngine.Object.FindFirstObjectByType(tipoCatalogo);
-            UnityEngine.Object progresoObj = UnityEngine.Object.FindFirstObjectByType(tipoProgreso);
-
-            if (catalogoObj == null || progresoObj == null)
-            {
-                Logger.LogWarning("Catálogo ou Progresso não encontrados. Certifique-se de estar DENTRO do jogo salvo.");
-                return;
-            }
-
-            // Puxa as variáveis originais de dados e estatísticas do jogo por reflexão
-            FieldInfo campoListaProdutos = tipoCatalogo.GetField("productsData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            
-            // CORREÇÃO DA IA: Usando tipoProgreso em vez de progresoObj para buscar as variáveis
-            FieldInfo campoProdutosVendidos = tipoProgreso.GetField("productsSoldList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            FieldInfo campoProdutosComprados = tipoProgreso.GetField("productsAcquiredList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            FieldInfo campoEstoqueAtual = tipoProgreso.GetField("productsInStockList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-            System.Collections.IEnumerable listaProdutos = campoListaProdutos.GetValue(catalogoObj) as System.Collections.IEnumerable;
-            int[] arrayVendidos = campoProdutosVendidos?.GetValue(progresoObj) as int[];
-            int[] arrayComprados = campoProdutosComprados?.GetValue(progresoObj) as int[];
-            int[] arrayEstoque = campoEstoqueAtual?.GetValue(progresoObj) as int[];
-
-            int contador = 0;
-
-            foreach (var produto in listaProdutos)
-            {
-                // CORREÇÃO DA IA: Trocado 'producto' por 'produto' em todas as linhas abaixo
-                Type tipoProducto = produto.GetType();
-                FieldInfo idField = tipoProducto.GetField("productID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                FieldInfo prefabField = tipoProducto.GetField("productPrefab", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                FieldInfo brandField = tipoProducto.GetField("productBrand", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-                int idInt = (int)(idField?.GetValue(produto) ?? -1);
-                if (idInt == -1) continue;
-
-                // Descobre o nome do produto decodificando o modelo 3D nativo do jogo
-                string nombre = "Desconhecido";
-                UnityEngine.Object prefabObj = prefabField?.GetValue(produto) as UnityEngine.Object;
-                if (prefabObj != null)
+                Assembly assemblyJuego = Assembly.Load("Assembly-CSharp");
+                if (assemblyJuego == null)
                 {
-                    nombre = prefabObj.name;
-                    if (nombre.Contains("_")) nombre = nombre.Substring(nombre.IndexOf('_') + 1);
-                }
-                else if (brandField != null)
-                {
-                    nombre = brandField.GetValue(produto)?.ToString() ?? "Desconhecido";
+                    Logger.LogError("Não foi possível carregar a DLL do jogo.");
+                    return;
                 }
 
-                // Limpa o nome para não quebrar a estrutura do CSV
-                nombre = nombre.Replace("\"", "").Replace(";", " ").Trim();
-
-                // Captura os dados numéricos correspondentes ao ID do produto nas listas da memória
-                int qtdVendida = (arrayVendidos != null && idInt >= 0 && idInt < arrayVendidos.Length) ? arrayVendidos[idInt] : 0;
-                int qtdComprada = (arrayComprados != null && idInt >= 0 && idInt < arrayComprados.Length) ? arrayComprados[idInt] : 0;
-                int qtdEstoque = (arrayEstoque != null && idInt >= 0 && idInt < arrayEstoque.Length) ? arrayEstoque[idInt] : 0;
-
-                // Monta a linha do Banco de Dados
-                csv.AppendLine($"{idInt};\"{nombre}\";{qtdComprada};{qtdVendida};{qtdEstoque}");
-                contador++;
+                foreach (Type tipo in assemblyJuego.GetTypes())
+                {
+                    // Procura por qualquer classe no jogo que tenha "Product" ou "Progression" ou "Store" no nome
+                    if (tipo.Name.Contains("Product") || tipo.Name.Contains("Progression") || tipo.Name.Contains("Store") || tipo.Name.Contains("Stat"))
+                    {
+                        Logger.LogInfo($"[CLASSE ENCONTRADA]: {tipo.Name}");
+                    }
+                }
+                Logger.LogInfo("=== FIM DO ESCANER DE MEMÓRIA ===");
             }
-
-            // Grava o arquivo fisicamente no computador
-            File.WriteAllText(rotaArquivo, csv.ToString(), Encoding.UTF8);
-            Logger.LogInfo($"--- SUCESSO! Banco de dados exportado com {contador} produtos em: {rotaArquivo} ---");
+            catch (Exception ex)
+            {
+                Logger.LogError("Erro ao escanear: " + ex.Message);
+            }
         }
     }
 }
