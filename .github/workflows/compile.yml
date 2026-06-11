@@ -13,19 +13,21 @@ jobs:
     - name: Descarregar o Código Fonte
       uses: actions/checkout@v4
 
-    - name: Configurar o MSBuild
-      uses: microsoft/setup-msbuild@v2
+    - name: Configurar .NET Core SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '6.0.x' # Garante o ambiente moderno do dotnet para o comando restore
 
     - name: Organizar Pastas de Dependencias
       run: |
-        # Caso os arquivos tenham sido upados soltos na raiz, este comando cria a pasta libs e move eles para lá
+        # Cria a pasta libs se os arquivos foram jogados soltos e move as DLLs
         if (Test-Path "Assembly-CSharp.dll") {
             mkdir libs -Force
             move *.dll libs/
         }
 
-    - name: Compilar o Mod (.dll)
-      run: msbuild ModExportadorPrecios.csproj /p:Configuration=Release
+    - name: Restaurar e Compilar o Mod (.dll)
+      run: dotnet build ModExportadorPrecios.csproj --configuration Release
 
     - name: Guardar o Mod Pronto para Download
       uses: actions/upload-artifact@v4
