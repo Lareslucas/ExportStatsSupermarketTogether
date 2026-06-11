@@ -1,5 +1,9 @@
 using System;
+using System.IO;
+using System.Text;
 using System.Reflection;
+using System.Collections;
+using System.Collections.Generic;
 using BepInEx;
 using UnityEngine;
 
@@ -10,80 +14,102 @@ namespace ExportadorEstatisticasSupermarket
     {
         private void Update()
         {
+            // Dispara a exportação oficial ao pressionar F10 dentro do mercado
             if (Input.GetKeyDown(KeyCode.F10))
             {
-                ExecutarSuperScannerGeral();
+                ExportarBancoDeDadosCSV();
             }
         }
 
-        private void ExecutarSuperScannerGeral()
+        private void ExportarBancoDeDadosCSV()
         {
-            Logger.LogInfo("==================================================================");
-            Logger.LogInfo("===   INICIANDO SUPER SCANNER RAIO-X (ARQUITETURA DO JOGO)   ===");
-            Logger.LogInfo("==================================================================");
+            Logger.LogInfo("--- INICIANDO EXPORTAÇÃO CORRIGIDA (BASE DE DADOS REAL) ---");
+            
+            string rotaArquivo = Path.Combine(Paths.PluginPath, "Estatisticas_Mercado.csv");
+            StringBuilder csv = new StringBuilder();
 
-            try
+            // Estrutura limpa para a planilha do Dashboard
+            csv.AppendLine("ID_Produto;Nome;Quantidade_Comprada;Quantidade_Vendida;Estoque_Inexistente_Fallback");
+
+            Assembly assemblyJuego = Assembly.Load("Assembly-CSharp");
+            Type tipoCatalogo = assemblyJuego.GetType("ProductListing");
+            Type tipoEstatisticas = assemblyJuego.GetType("StatisticsManager");
+
+            if (tipoCatalogo == null || tipoEstatisticas == null)
             {
-                Assembly assemblyJuego = Assembly.Load("Assembly-CSharp");
-                if (assemblyJuego == null)
+                Logger.LogError("Erro de correspondência: Classes de memória não encontradas.");
+                return;
+            }
+
+            // Acessa as instâncias ativas do catálogo e do gerenciador de estatísticas do seu save
+            UnityEngine.Object catalogoObj = UnityEngine.Object.FindFirstObjectByType(tipoCatalogo);
+            UnityEngine.Object estatisticasObj = UnityEngine.Object.FindFirstObjectByType(tipoEstatisticas);
+
+            if (catalogoObj == null || estatisticasObj == null)
+            {
+                Logger.LogWarning("Por favor, garanta que você está DENTRO da partida antes de apertar F9.");
+                return;
+            }
+
+            // Puxa as variáveis de tabelas via Reflexão com os nomes reais do log
+            FieldInfo campoProdutos = tipoCatalogo.GetField("productsData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            FieldInfo campoVendidos = tipoEstatisticas.GetField("productsSold", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            FieldInfo campoComprados = tipoEstatisticas.GetField("productsAcquired", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+            IEnumerable listaProdutos = campoProdutos.GetValue(catalogoObj) as IEnumerable;
+            
+            // As estatísticas agora usam List<int> em vez de arrays comuns, tratamos como IList para aceitar qualquer contagem dinâmica
+            IList listaVendidos = campoVendidos?.GetValue(estatisticasObj) as IList;
+            IList listaComprados = campoComprados?.GetValue(estatisticasObj) as IList;
+
+            int contador = 0;
+
+            foreach (var produto in listaProdutos)
+            {
+                Type tipoProduto = produto.GetType();
+                int idInt = (int)(tipoProduto.GetField("productID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(produto) ?? -1);
+                
+                if (idInt == -1) continue;
+
+                // Extrai e limpa o nome do modelo 3D do produto
+                string nombre = "Desconhecido";
+                UnityEngine.Object prefabObj = tipoProduto.GetField("productPrefab", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(produto) as UnityEngine.Object;
+                
+                if (prefabObj != null)
                 {
-                    Logger.LogError("Erro: Não foi possível carregar a DLL principal 'Assembly-CSharp'.");
-                    return;
+                    nombre = prefabObj.name;
+                    if (nombre.Contains("_")) nombre = nombre.Substring(nombre.IndexOf('_') + 1);
+                }
+                else
+                {
+                    nombre = tipoProduto.GetField("productBrand", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(produto)?.ToString() ?? "Desconhecido";
                 }
 
-                // Palavras-chave para monitorar o presente e mapear o futuro do seu Dashboard
-                string[] palavrasChave = { "product", "stock", "steal", "thief", "rob", "recover", "bill", "tax", "expense", "money", "stat", "economy", "finance" };
+                nombre = nombre.Replace("\"", "").Replace(";", " ").Trim();
 
-                int classesEncontradas = 0;
-
-                foreach (Type tipo in assemblyJuego.GetTypes())
+                // Busca as quantidades vendidas e compradas usando o ID como índice da lista
+                int qtdVendida = 0;
+                if (listaVendidos != null && idInt >= 0 && idInt < listaVendidos.Count)
                 {
-                    string nomeClasseMinusculo = tipo.Name.ToLower();
-                    bool classeMatches = false;
-
-                    // Verifica se o nome da classe bate com alguma palavra-chave
-                    foreach (string palavra in palavrasChave)
-                    {
-                        if (nomeClasseMinusculo.Contains(palavra))
-                        {
-                            classeMatches = true;
-                            break;
-                        }
-                    }
-
-                    if (classeMatches)
-                    {
-                        classesEncontradas++;
-                        Logger.LogInfo($"\n[CLASSE DETECTADA]: {tipo.Name}");
-
-                        // Vasculha as variáveis internas (Campos/Fields) dessa classe para achar os contadores ocultos
-                        FieldInfo[] campos = tipo.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-                        foreach (FieldInfo campo in campos)
-                        {
-                            Logger.LogInfo($"   ├── -> [VARIÁVEL]: {campo.Name} ({campo.FieldType.Name})");
-                        }
-
-                        // Vasculha os métodos (Funções de ação) dessa classe (ex: cobrar conta, registrar roubo)
-                        MethodInfo[] metodos = tipo.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-                        foreach (MethodInfo metodo in metodos)
-                        {
-                            // Ignora métodos padrões repetitivos do C# para o log ficar limpo
-                            if (metodo.DeclaringType == tipo)
-                            {
-                                Logger.LogInfo($"   └── [MÉTODO]: {metodo.Name}()");
-                            }
-                        }
-                    }
+                    qtdVendida = Convert.ToInt32(listaVendidos[idInt]);
                 }
 
-                Logger.LogInfo("\n==================================================================");
-                Logger.LogInfo($"=== SUPER SCANNER CONCLUÍDO! Mapeadas {classesEncontradas} classes de interesse ===");
-                Logger.LogInfo("==================================================================");
+                int qtdComprada = 0;
+                if (listaComprados != null && idInt >= 0 && idInt < listaComprados.Count)
+                {
+                    qtdComprada = Convert.ToInt32(listaComprados[idInt]);
+                }
+
+                // Nota técnica: O jogo não possui uma lista de "Estoque Atual" em números na classe de estatísticas. 
+                // Deixamos o valor como 0 provisório para não quebrar a coluna da sua planilha nesta versão.
+                int qtdEstoque = 0; 
+
+                csv.AppendLine($"{idInt};\"{nombre}\";{qtdComprada};{qtdVendida};{qtdEstoque}");
+                contador++;
             }
-            catch (Exception ex)
-            {
-                Logger.LogError("Erro crítico durante a varredura de Engenharia Reversa: " + ex.Message);
-            }
+
+            File.WriteAllText(rotaArquivo, csv.ToString(), Encoding.UTF8);
+            Logger.LogInfo($"--- SUCESSO ABSOLUTO! Arquivo salvo com {contador} itens em: {rotaArquivo} ---");
         }
     }
 }
