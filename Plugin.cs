@@ -25,7 +25,7 @@ namespace ExportadorEstatisticasSupermarket
         {
             Logger.LogInfo("--- INICIANDO EXPORTAÇÃO COMPLETA DE ESTADO DO MERCADO ---");
             
-            // Caminho onde o arquivo será salvo (Dentro de BepInEx/plugins/)
+            // CORREÇÃO: Força o salvamento exatamente na raiz da pasta plugins
             string rotaArquivo = Path.Combine(Paths.PluginPath, "Estatisticas_Mercado.csv");
             StringBuilder csv = new StringBuilder();
 
@@ -56,10 +56,10 @@ namespace ExportadorEstatisticasSupermarket
             // Puxa as variáveis originais de dados e estatísticas do jogo por reflexão
             FieldInfo campoListaProdutos = tipoCatalogo.GetField("productsData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             
-            // Puxa os dados acumulados direto das estatísticas diárias da RAM (Consertando o bug do arquivo .es3)
-            FieldInfo campoProdutosVendidos = progresoObj.GetField("productsSoldList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            FieldInfo campoProdutosComprados = progresoObj.GetField("productsAcquiredList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            FieldInfo campoEstoqueAtual = progresoObj.GetField("productsInStockList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance); // Se o jogo mantiver essa lista ativa
+            // CORREÇÃO DA IA: Usando tipoProgreso em vez de progresoObj para buscar as variáveis
+            FieldInfo campoProdutosVendidos = tipoProgreso.GetField("productsSoldList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            FieldInfo campoProdutosComprados = tipoProgreso.GetField("productsAcquiredList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            FieldInfo campoEstoqueAtual = tipoProgreso.GetField("productsInStockList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
             System.Collections.IEnumerable listaProdutos = campoListaProdutos.GetValue(catalogoObj) as System.Collections.IEnumerable;
             int[] arrayVendidos = campoProdutosVendidos?.GetValue(progresoObj) as int[];
@@ -70,17 +70,18 @@ namespace ExportadorEstatisticasSupermarket
 
             foreach (var produto in listaProdutos)
             {
-                Type tipoProducto = producto.GetType();
+                // CORREÇÃO DA IA: Trocado 'producto' por 'produto' em todas as linhas abaixo
+                Type tipoProducto = produto.GetType();
                 FieldInfo idField = tipoProducto.GetField("productID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 FieldInfo prefabField = tipoProducto.GetField("productPrefab", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 FieldInfo brandField = tipoProducto.GetField("productBrand", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
-                int idInt = (int)(idField?.GetValue(producto) ?? -1);
+                int idInt = (int)(idField?.GetValue(produto) ?? -1);
                 if (idInt == -1) continue;
 
                 // Descobre o nome do produto decodificando o modelo 3D nativo do jogo
                 string nombre = "Desconhecido";
-                UnityEngine.Object prefabObj = prefabField?.GetValue(producto) as UnityEngine.Object;
+                UnityEngine.Object prefabObj = prefabField?.GetValue(produto) as UnityEngine.Object;
                 if (prefabObj != null)
                 {
                     nombre = prefabObj.name;
@@ -88,7 +89,7 @@ namespace ExportadorEstatisticasSupermarket
                 }
                 else if (brandField != null)
                 {
-                    nombre = brandField.GetValue(producto)?.ToString() ?? "Desconhecido";
+                    nombre = brandField.GetValue(produto)?.ToString() ?? "Desconhecido";
                 }
 
                 // Limpa o nome para não quebrar a estrutura do CSV
@@ -97,11 +98,9 @@ namespace ExportadorEstatisticasSupermarket
                 // Captura os dados numéricos correspondentes ao ID do produto nas listas da memória
                 int qtdVendida = (arrayVendidos != null && idInt >= 0 && idInt < arrayVendidos.Length) ? arrayVendidos[idInt] : 0;
                 int qtdComprada = (arrayComprados != null && idInt >= 0 && idInt < arrayComprados.Length) ? arrayComprados[idInt] : 0;
-                
-                // Se o jogo não tiver o estoque mapeado em array, tentamos ler via caixas na gôndola, caso contrário usa o fallback
                 int qtdEstoque = (arrayEstoque != null && idInt >= 0 && idInt < arrayEstoque.Length) ? arrayEstoque[idInt] : 0;
 
-                // Monta a linha do Banco de Dados usando ponto e vírgula como separador oficial
+                // Monta a linha do Banco de Dados
                 csv.AppendLine($"{idInt};\"{nombre}\";{qtdComprada};{qtdVendida};{qtdEstoque}");
                 contador++;
             }
