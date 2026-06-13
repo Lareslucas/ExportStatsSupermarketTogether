@@ -2,8 +2,8 @@
 
   <PropertyGroup>
     <TargetFramework>net46</TargetFramework>
-    <AssemblyName>ExportadorEstatisticasSupermarket</AssemblyName>
-    <RootNamespace>ExportadorEstatisticasSupermarket</RootNamespace>
+    <AssemblyName>ExportStatsSupermarketTogether</AssemblyName>
+    <RootNamespace>ExportStatsSupermarketTogether</RootNamespace>
     <Version>1.0.0</Version>
   </PropertyGroup>
 
