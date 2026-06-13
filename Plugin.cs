@@ -5,111 +5,157 @@ using System.Reflection;
 using System.Collections;
 using System.Collections.Generic;
 using BepInEx;
+using HarmonyLib;
 using UnityEngine;
 
-namespace ExportadorEstatisticasSupermarket
+namespace ExportStatsSupermarketTogether
 {
-    [BepInPlugin("com.lucas.supermarket.estatisticas", "Exportador de Estatisticas Real", "1.0.0")]
-    public class ExportadorPlugin : BaseUnityPlugin
+    [BepInPlugin("com.lucas.supermarket.exportstats", "Export Stats Supermarket Together", "1.0.0")]
+    public class ExportStatsPlugin : BaseUnityPlugin
     {
+        private static ExportStatsPlugin Instance;
+
+        private void Awake()
+        {
+            Instance = this;
+            
+            // Inicializa o Harmony para interceptar os salvamentos do jogo automaticamente
+            var harmony = new Harmony("com.lucas.supermarket.exportstats");
+            harmony.PatchAll();
+            
+            Logger.LogInfo("=== MOD EXPORT STATS INICIALIZADO COM SUCESSO (SISTEMA AUTOMÁTICO ATIVO) ===");
+        }
+
         private void Update()
         {
-            // Dispara a exportação oficial ao pressionar F10 dentro do mercado
+            // Tecla F10 escolhida por você para forçar o backup manual instantâneo
             if (Input.GetKeyDown(KeyCode.F10))
             {
-                ExportarBancoDeDadosCSV();
+                Logger.LogInfo("[F10] Disparando rotina forçada de backup de estatísticas...");
+                ProcessarEExecutarSalvamentoDuplo();
             }
         }
 
-        private void ExportarBancoDeDadosCSV()
+        // Intercepta o método do jogo que roda no salvamento automático e manual
+        [HarmonyPatch(typeof(SaveBehaviour), "SavePersistentValues")]
+        [HarmonyPostfix]
+        public static void Postfix_SavePersistentValues()
         {
-            Logger.LogInfo("--- INICIANDO EXPORTAÇÃO CORRIGIDA (BASE DE DADOS REAL) ---");
-            
-            string rotaArquivo = Path.Combine(Paths.PluginPath, "Estatisticas_Mercado.csv");
-            StringBuilder csv = new StringBuilder();
+            Instance?.Logger.LogInfo("[Mod Auto-Save] Ciclo de salvamento detectado no jogo. Sincronizando estatísticas...");
+            Instance?.ProcessarEExecutarSalvamentoDuplo();
+        }
 
-            // Estrutura limpa para a planilha do Dashboard
-            csv.AppendLine("ID_Produto;Nome;Quantidade_Comprada;Quantidade_Vendida;Estoque_Inexistente_Fallback");
+        // Intercepta a função que finaliza as estatísticas do dia
+        [HarmonyPatch(typeof(StatisticsManager), "SaveStatistics")]
+        [HarmonyPostfix]
+        public static void Postfix_SaveStatistics()
+        {
+            Instance?.Logger.LogInfo("[Mod End-Day] Fim de dia detectado. Congelando dados do dia anterior...");
+            Instance?.ProcessarEExecutarSalvamentoDuplo();
+        }
 
-            Assembly assemblyJuego = Assembly.Load("Assembly-CSharp");
-            Type tipoCatalogo = assemblyJuego.GetType("ProductListing");
-            Type tipoEstatisticas = assemblyJuego.GetType("StatisticsManager");
-
-            if (tipoCatalogo == null || tipoEstatisticas == null)
+        private void ProcessarEExecutarSalvamentoDuplo()
+        {
+            try
             {
-                Logger.LogError("Erro de correspondência: Classes de memória não encontradas.");
-                return;
-            }
-
-            // Acessa as instâncias ativas do catálogo e do gerenciador de estatísticas do seu save
-            UnityEngine.Object catalogoObj = UnityEngine.Object.FindFirstObjectByType(tipoCatalogo);
-            UnityEngine.Object estatisticasObj = UnityEngine.Object.FindFirstObjectByType(tipoEstatisticas);
-
-            if (catalogoObj == null || estatisticasObj == null)
-            {
-                Logger.LogWarning("Por favor, garanta que você está DENTRO da partida antes de apertar F9.");
-                return;
-            }
-
-            // Puxa as variáveis de tabelas via Reflexão com os nomes reais do log
-            FieldInfo campoProdutos = tipoCatalogo.GetField("productsData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            FieldInfo campoVendidos = tipoEstatisticas.GetField("productsSold", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            FieldInfo campoComprados = tipoEstatisticas.GetField("productsAcquired", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-            IEnumerable listaProdutos = campoProdutos.GetValue(catalogoObj) as IEnumerable;
-            
-            // As estatísticas agora usam List<int> em vez de arrays comuns, tratamos como IList para aceitar qualquer contagem dinâmica
-            IList listaVendidos = campoVendidos?.GetValue(estatisticasObj) as IList;
-            IList listaComprados = campoComprados?.GetValue(estatisticasObj) as IList;
-
-            int contador = 0;
-
-            foreach (var produto in listaProdutos)
-            {
-                Type tipoProduto = produto.GetType();
-                int idInt = (int)(tipoProduto.GetField("productID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(produto) ?? -1);
+                // 1. Captura o Dia Atual direto do motor do jogo (GameData.gameDay)
+                Type tipoGameData = Type.GetType("GameData, Assembly-CSharp");
+                if (tipoGameData == null) return;
                 
-                if (idInt == -1) continue;
+                int diaAtual = Convert.ToInt32(tipoGameData.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)?.GetValue(null) ?? -1);
+                if (diaAtual == -1) return;
 
-                // Extrai e limpa o nome do modelo 3D do produto
-                string nombre = "Desconhecido";
-                UnityEngine.Object prefabObj = tipoProduto.GetField("productPrefab", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(produto) as UnityEngine.Object;
-                
-                if (prefabObj != null)
-                {
-                    nombre = prefabObj.name;
-                    if (nombre.Contains("_")) nombre = nombre.Substring(nombre.IndexOf('_') + 1);
-                }
-                else
-                {
-                    nombre = tipoProduto.GetField("productBrand", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(produto)?.ToString() ?? "Desconhecido";
-                }
+                // 2. Localiza as estatísticas acumuladas na memória RAM (StatisticsManager)
+                Type tipoStats = Type.GetType("StatisticsManager, Assembly-CSharp");
+                object statsInstance = tipoStats?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                if (statsInstance == null) return;
 
-                nombre = nombre.Replace("\"", "").Replace(";", " ").Trim();
-
-                // Busca as quantidades vendidas e compradas usando o ID como índice da lista
-                int qtdVendida = 0;
-                if (listaVendidos != null && idInt >= 0 && idInt < listaVendidos.Count)
+                // 3. Captura o slot de salvamento ativo (X) analisando a rota do SaveManager nativo
+                int slotAtivo = 3; // Fallback padrão caso não consiga ler dinamicamente
+                Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
+                if (tipoSaveManager != null)
                 {
-                    qtdVendida = Convert.ToInt32(listaVendidos[idInt]);
+                    object saveInstance = tipoSaveManager.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                    int? slotDinamico = saveInstance?.GetType().GetField("currentSlot", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(saveInstance) as int?;
+                    if (slotDinamico.HasValue) slotAtivo = slotDinamico.Value;
                 }
 
-                int qtdComprada = 0;
-                if (listaComprados != null && idInt >= 0 && idInt < listaComprados.Count)
+                // Define as rotas corretas dos dois arquivos independentes
+                string nomeArquivoSave = $"StoreFile{slotAtivo}stats.es3";
+                string pastaSavesJogo = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "..", "LocalLow", "Nokta Games", "Supermarket Together");
+                string rotaSaveOficial = Path.Combine(pastaSavesJogo, nomeArquivoSave);
+
+                string pastaBackupMod = Path.Combine(Paths.PluginPath, "ExportStatsSupermarketTogether", "BackupStats");
+                if (!Directory.Exists(pastaBackupMod)) Directory.CreateDirectory(pastaBackupMod);
+                string rotaBackupSeguro = Path.Combine(pastaBackupMod, $"Backup_{nomeArquivoSave}.json");
+
+                // 4. Mapeia e extrai os valores de todas as variáveis de estatísticas do jogo
+                Dictionary<string, string> dadosDia = PackValoresEstatisticas(tipoStats, statsInstance);
+
+                // 5. EFETUA A GRAVAÇÃO 1: Injeta diretamente no arquivo oficial .es3 usando a biblioteca ES3 do jogo
+                Type tipoES3 = Type.GetType("ES3, Assembly-CSharp-firstpass") ?? Type.GetType("ES3, Assembly-CSharp");
+                if (tipoES3 != null)
                 {
-                    qtdComprada = Convert.ToInt32(listaComprados[idInt]);
+                    MethodInfo metodoSaveStr = tipoES3.GetMethod("Save", new Type[] { typeof(string), typeof(object), typeof(string) });
+                    foreach (var par in dadosDia)
+                    {
+                        string chaveComDia = $"day{diaAtual}stat{par.Key}";
+                        metodoSaveStr?.Invoke(null, new object[] { chaveComDia, par.Value, rotaSaveOficial });
+                    }
+                    Logger.LogInfo($"[Sucesso] Gravação 1 injetada no save oficial do slot {slotAtivo}.");
                 }
 
-                // Nota técnica: O jogo não possui uma lista de "Estoque Atual" em números na classe de estatísticas. 
-                // Deixamos o valor como 0 provisório para não quebrar a coluna da sua planilha nesta versão.
-                int qtdEstoque = 0; 
-
-                csv.AppendLine($"{idInt};\"{nombre}\";{qtdComprada};{qtdVendida};{qtdEstoque}");
-                contador++;
+                // 6. EFETUA A GRAVAÇÃO 2: Salva no Backup Seguro (.json) isolado do controle do jogo
+                SalvarBackupJsonSeguro(rotaBackupSeguro, diaAtual, dadosDia);
+                Logger.LogInfo($"[Sucesso] Gravação 2 (Espelho Seguro) atualizada na pasta do mod.");
             }
+            catch (Exception ex)
+            {
+                Logger.LogError("Erro crítico na execução do salvamento duplo: " + ex.Message);
+            }
+        }
 
-            File.WriteAllText(rotaArquivo, csv.ToString(), Encoding.UTF8);
-            Logger.LogInfo($"--- SUCESSO ABSOLUTO! Arquivo salvo com {contador} itens em: {rotaArquivo} ---");
+        private Dictionary<string, string> PackValoresEstatisticas(Type tipoStats, object instance)
+        {
+            Dictionary<string, string> dict = new Dictionary<string, string>();
+            string[] camposSimples = {
+                "customers", "benefits", "franchiseExperience", "timesRobbed", "moneySpentOnProducts",
+                "notFoundProductsCount", "tooExpensiveProductsCount", "lightCost", "rentCost", "employeesCost",
+                "omplainedAboutFilth", "totalsProductsSoldThisDay", "totalProductsAcquiredThisDay",
+                "productsPlacedInContainers", "totalBoxesRecycled", "totalBalesRecycled", "totalBoxesAddedToBaler",
+                "totalTrashCollected", "stolenProductsCollectedFromFloor", "analyzedCustomers",
+                "caughtThievesWhenAnalyzing", "salesMade", "extraProductsSoldThankToSales", "paidInvoices",
+                "onlineOrdersMade", "moneyMadeByOnlineOrders", "repairedDevices", "bystandersConvertedIntoCustomers"
+            };
+
+            foreach (string nomeCampo in camposSimples)
+            {
+                var campo = tipoStats.GetField(nomeCampo, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                dict[nomeCampo] = campo?.GetValue(instance)?.ToString() ?? "0";
+            }
+            return dict;
+        }
+
+        private void SalvarBackupJsonSeguro(string rota, int dia, Dictionary<string, string> novosDados)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("{");
+            sb.AppendLine($"  \"Ultima_Atualizacao\": \"{DateTime.Now:dd/MM/yyyy HH:mm:ss}\",");
+            sb.AppendLine($"  \"Dia_Atual_Ativo\": {dia},");
+            sb.AppendLine($"  \"Estatisticas_Dia_{dia}\": {{");
+            
+            int total = novosDados.Count;
+            int cont = 0;
+            foreach(var kvp in novosDados)
+            {
+                cont++;
+                string sufixo = (cont < total) ? "," : "";
+                sb.AppendLine($"    \"day{dia}stat{kvp.Key}\": \"{kvp.Value}\"{sufixo}");
+            }
+            
+            sb.AppendLine("  }");
+            sb.AppendLine("}");
+            File.WriteAllText(rota, sb.ToString(), Encoding.UTF8);
         }
     }
 }
