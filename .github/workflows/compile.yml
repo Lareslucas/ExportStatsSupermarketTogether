@@ -32,5 +32,5 @@ jobs:
     - name: Guardar o Mod Pronto para Download
       uses: actions/upload-artifact@v4
       with:
-        name: Mod-Estatisticas-Supermarket
-        path: bin/Release/**/ExportadorEstatisticasSupermarket.dll
+        name: Mod-Consertador-Supermarket
+        path: bin/Release/net46/ExportStatsSupermarketTogether.dll
