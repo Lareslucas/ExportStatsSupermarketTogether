@@ -19,16 +19,22 @@ namespace ExportStatsSupermarketTogether
         {
             Instance = this;
             
-            // Inicializa o Harmony para interceptar os salvamentos do jogo automaticamente
-            var harmony = new Harmony("com.lucas.supermarket.exportstats");
-            harmony.PatchAll();
-            
-            Logger.LogInfo("=== MOD EXPORT STATS INICIALIZADO COM SUCESSO (SISTEMA AUTOMÁTICO ATIVO) ===");
+            try
+            {
+                // Inicializa os ganchos do Harmony para monitorar os saves automaticamente
+                var harmony = new Harmony("com.lucas.supermarket.exportstats");
+                harmony.PatchAll();
+                Logger.LogInfo("=== MOD EXPORT STATS INICIALIZADO COM SUCESSO (SISTEMA AUTOMÁTICO ATIVO) ===");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("Falha ao inicializar ganchos do Harmony: " + ex.Message);
+            }
         }
 
         private void Update()
         {
-            // Tecla F10 escolhida por você para forçar o backup manual instantâneo
+            // Tecla F10 configurada para forçar o salvamento manual do log e do backup
             if (Input.GetKeyDown(KeyCode.F10))
             {
                 Logger.LogInfo("[F10] Disparando rotina forçada de backup de estatísticas...");
@@ -36,7 +42,7 @@ namespace ExportStatsSupermarketTogether
             }
         }
 
-        // Intercepta o método do jogo que roda no salvamento automático e manual
+        // Intercepta o salvamento automático de 5 em 5 minutos e salvamentos manuais
         [HarmonyPatch(typeof(SaveBehaviour), "SavePersistentValues")]
         [HarmonyPostfix]
         public static void Postfix_SavePersistentValues()
@@ -45,7 +51,7 @@ namespace ExportStatsSupermarketTogether
             Instance?.ProcessarEExecutarSalvamentoDuplo();
         }
 
-        // Intercepta a função que finaliza as estatísticas do dia
+        // Intercepta o encerramento do dia quando o jogo salva as parciais
         [HarmonyPatch(typeof(StatisticsManager), "SaveStatistics")]
         [HarmonyPostfix]
         public static void Postfix_SaveStatistics()
@@ -70,8 +76,8 @@ namespace ExportStatsSupermarketTogether
                 object statsInstance = tipoStats?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
                 if (statsInstance == null) return;
 
-                // 3. Captura o slot de salvamento ativo (X) analisando a rota do SaveManager nativo
-                int slotAtivo = 3; // Fallback padrão caso não consiga ler dinamicamente
+                // 3. Captura o slot de salvamento ativo (X) analisando o SaveManager nativo
+                int slotAtivo = 3; // Fallback padrão caso falhe a leitura dinâmica
                 Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
                 if (tipoSaveManager != null)
                 {
@@ -80,7 +86,7 @@ namespace ExportStatsSupermarketTogether
                     if (slotDinamico.HasValue) slotAtivo = slotDinamico.Value;
                 }
 
-                // Define as rotas corretas dos dois arquivos independentes
+                // Configura as rotas dos dois arquivos independentes de gravação
                 string nomeArquivoSave = $"StoreFile{slotAtivo}stats.es3";
                 string pastaSavesJogo = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "..", "LocalLow", "Nokta Games", "Supermarket Together");
                 string rotaSaveOficial = Path.Combine(pastaSavesJogo, nomeArquivoSave);
@@ -89,10 +95,10 @@ namespace ExportStatsSupermarketTogether
                 if (!Directory.Exists(pastaBackupMod)) Directory.CreateDirectory(pastaBackupMod);
                 string rotaBackupSeguro = Path.Combine(pastaBackupMod, $"Backup_{nomeArquivoSave}.json");
 
-                // 4. Mapeia e extrai os valores de todas as variáveis de estatísticas do jogo
+                // 4. Empacota os valores de todas as variáveis do StatisticsManager
                 Dictionary<string, string> dadosDia = PackValoresEstatisticas(tipoStats, statsInstance);
 
-                // 5. EFETUA A GRAVAÇÃO 1: Injeta diretamente no arquivo oficial .es3 usando a biblioteca ES3 do jogo
+                // 5. GRAVAÇÃO 1: Injeta diretamente no save oficial (.es3) usando o motor do jogo
                 Type tipoES3 = Type.GetType("ES3, Assembly-CSharp-firstpass") ?? Type.GetType("ES3, Assembly-CSharp");
                 if (tipoES3 != null)
                 {
@@ -105,7 +111,7 @@ namespace ExportStatsSupermarketTogether
                     Logger.LogInfo($"[Sucesso] Gravação 1 injetada no save oficial do slot {slotAtivo}.");
                 }
 
-                // 6. EFETUA A GRAVAÇÃO 2: Salva no Backup Seguro (.json) isolado do controle do jogo
+                // 6. GRAVAÇÃO 2: Salva no arquivo de Backup Espelho (.json) isolado e seguro
                 SalvarBackupJsonSeguro(rotaBackupSeguro, diaAtual, dadosDia);
                 Logger.LogInfo($"[Sucesso] Gravação 2 (Espelho Seguro) atualizada na pasta do mod.");
             }
