@@ -27,7 +27,7 @@ jobs:
         }
 
     - name: Restaurar e Compilar o Mod (.dll)
-      run: dotnet build ModExportadorPrecios.csproj --configuration Release
+      run: dotnet build ExportStatsSupermarketTogether.csproj --configuration Release
 
     - name: Guardar o Mod Pronto para Download
       uses: actions/upload-artifact@v4
