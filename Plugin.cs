@@ -21,7 +21,6 @@ namespace ExportStatsSupermarketTogether
             
             try
             {
-                // Inicializa os ganchos do Harmony para monitorar os saves automaticamente
                 var harmony = new Harmony("com.lucas.supermarket.exportstats");
                 harmony.PatchAll();
                 Logger.LogInfo("=== MOD EXPORT STATS INICIALIZADO COM SUCESSO (SISTEMA AUTOMÁTICO ATIVO) ===");
@@ -34,7 +33,6 @@ namespace ExportStatsSupermarketTogether
 
         private void Update()
         {
-            // Tecla F10 configurada para forçar o salvamento manual do log e do backup
             if (Input.GetKeyDown(KeyCode.F10))
             {
                 Logger.LogInfo("[F10] Disparando rotina forçada de backup de estatísticas...");
@@ -42,7 +40,6 @@ namespace ExportStatsSupermarketTogether
             }
         }
 
-        // Intercepta o salvamento automático de 5 em 5 minutos e salvamentos manuais
         [HarmonyPatch(typeof(SaveBehaviour), "SavePersistentValues")]
         [HarmonyPostfix]
         public static void Postfix_SavePersistentValues()
@@ -51,7 +48,6 @@ namespace ExportStatsSupermarketTogether
             Instance?.ProcessarEExecutarSalvamentoDuplo();
         }
 
-        // Intercepta o encerramento do dia quando o jogo salva as parciais
         [HarmonyPatch(typeof(StatisticsManager), "SaveStatistics")]
         [HarmonyPostfix]
         public static void Postfix_SaveStatistics()
@@ -64,12 +60,31 @@ namespace ExportStatsSupermarketTogether
         {
             try
             {
-                // 1. Captura o Dia Atual direto do motor do jogo (GameData.gameDay)
-                Type tipoGameData = Type.GetType("GameData, Assembly-CSharp");
-                if (tipoGameData == null) return;
+                // 1. Captura o Dia Atual de forma blindada analisando o SaveBehaviour ativo na RAM
+                Type tipoSaveBehaviour = typeof(SaveBehaviour);
+                object saveBehaviourInstance = GameObject.FindObjectOfType<SaveBehaviour>();
                 
-                int diaAtual = Convert.ToInt32(tipoGameData.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)?.GetValue(null) ?? -1);
-                if (diaAtual == -1) return;
+                int diaAtual = -1;
+
+                if (saveBehaviourInstance != null)
+                {
+                    // Tenta buscar a variável gameData de dentro do salvamento ativo
+                    var campoGameData = tipoSaveBehaviour.GetField("gameData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    object gameDataInstance = campoGameData?.GetValue(saveBehaviourInstance);
+
+                    if (gameDataInstance != null)
+                    {
+                        var campoGameDay = gameDataInstance.GetType().GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+                        diaAtual = Convert.ToInt32(campoGameDay?.GetValue(gameDataInstance) ?? -1);
+                    }
+                }
+
+                // Se o jogo ainda não carregou o dia na RAM, aborta silenciosamente para não dar erro crashar
+                if (diaAtual == -1)
+                {
+                    Logger.LogWarning("[Aviso] O dia atual ainda não foi inicializado pelo jogo. Aguarde o supermercado carregar por completo.");
+                    return;
+                }
 
                 // 2. Localiza as estatísticas acumuladas na memória RAM (StatisticsManager)
                 Type tipoStats = Type.GetType("StatisticsManager, Assembly-CSharp");
@@ -77,7 +92,7 @@ namespace ExportStatsSupermarketTogether
                 if (statsInstance == null) return;
 
                 // 3. Captura o slot de salvamento ativo (X) analisando o SaveManager nativo
-                int slotAtivo = 3; // Fallback padrão caso falhe a leitura dinâmica
+                int slotAtivo = 3; 
                 Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
                 if (tipoSaveManager != null)
                 {
