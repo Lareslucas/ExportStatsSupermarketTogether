@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Lib.Harmony" Version="2.3.3" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="BepInEx">
       <HintPath>Libs\BepInEx.dll</HintPath>
     </Reference>
@@ -28,9 +32,6 @@
     </Reference>
     <Reference Include="Assembly-CSharp">
       <HintPath>Libs\Assembly-CSharp.dll</HintPath>
-    </Reference>
-    <Reference Include="0Harmony">
-      <HintPath>Libs\0Harmony.dll</HintPath>
     </Reference>
   </ItemGroup>
 
