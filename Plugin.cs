@@ -24,7 +24,7 @@ namespace ExportStatsSupermarketTogether
             {
                 var harmony = new Harmony("com.lucas.supermarket.exportstats");
                 harmony.PatchAll();
-                Logger.LogInfo("=== BANCO DE DADOS EXTERNO INICIALIZADO (MODO REFLEXÃO DE SLOT ATIVO) ===");
+                Logger.LogInfo("=== BANCO DE DADOS EXTERNO INICIALIZADO (MODO BUFFER DE PERSISTÊNCIA ES3) ===");
             }
             catch (Exception ex)
             {
@@ -96,8 +96,8 @@ namespace ExportStatsSupermarketTogether
                     diaAtual -= 1;
                 }
 
-                // Captura o Slot de forma precisa quebrando a String do save ativo na RAM
-                int slotAtivo = ExtrairSlotAtivoDaMemoriaInterna();
+                // ANALISE DE BUFFER: Descobre o slot ativo inspecionando as chaves de gravação do Easy Save na RAM
+                int slotAtivo = ObterSlotPeloBufferDoEasySave();
 
                 string pastaBackupMod = Path.Combine(Paths.PluginPath, "ExportStatsSupermarketTogether", "BackupStats");
                 if (!Directory.Exists(pastaBackupMod)) Directory.CreateDirectory(pastaBackupMod);
@@ -107,7 +107,7 @@ namespace ExportStatsSupermarketTogether
 
                 GravarNoBancoDeDadosJson(rotaJsonMetricas, slotAtivo, diaAtual, dadosProntos);
                 
-                Logger.LogInfo($"[Sucesso] Banco de dados atualizado. Slot Detectado: {slotAtivo} | Registro do Dia {diaAtual} guardado.");
+                Logger.LogInfo($"[Sucesso] Banco de dados atualizado. Slot Detectado via Buffer: {slotAtivo} | Registro do Dia {diaAtual} guardado.");
             }
             catch (Exception ex)
             {
@@ -130,36 +130,11 @@ namespace ExportStatsSupermarketTogether
             catch { return -1; }
         }
 
-        private int ExtrairSlotAtivoDaMemoriaInterna()
+        private int ObterSlotPeloBufferDoEasySave()
         {
             try
             {
-                // Localiza a classe de verificação de arquivos que descobrimos no Scanner automático
-                Type tipoCheckSave = Type.GetType("CheckIfAutosaveExists, Assembly-CSharp");
-                if (tipoCheckSave != null)
-                {
-                    object instanceCheck = GameObject.FindObjectOfType(tipoCheckSave);
-                    if (instanceCheck != null)
-                    {
-                        // Lê a String textual 'savefile' direto da RAM (Ex: "StoreFile0.es3")
-                        var campoSaveFile = tipoCheckSave.GetField("savefile", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-                        string textoDoSave = campoSaveFile?.GetValue(instanceCheck) as string;
-
-                        if (!string.IsNullOrEmpty(textoDoSave))
-                        {
-                            foreach (char c in textoDoSave)
-                            {
-                                if (char.IsDigit(c))
-                                {
-                                    int numeroExtraido = int.Parse(c.ToString());
-                                    if (numeroExtraido >= 0 && numeroExtraido <= 9) return numeroExtraido;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Fallback secundário de reflexão pelo EasySave caso a UI seja destruída completamente
+                // Busca a classe de configuração nativa do motor de salvamento Easy Save 3
                 Type tipoES3Settings = Type.GetType("ES3Settings, Assembly-CSharp-firstpass") ?? Type.GetType("ES3Settings, Assembly-CSharp");
                 if (tipoES3Settings != null)
                 {
@@ -168,7 +143,8 @@ namespace ExportStatsSupermarketTogether
 
                     if (defaultSettingsInstance != null)
                     {
-                        var campoPath = defaultSettingsInstance.GetType().GetField("path", BindingFlags.Public | BindingFlags.Instance);
+                        // Lê o campo 'path' que indica qual arquivo está atrelado ao buffer ativo na RAM
+                        var campoPath = defaultSettingsInstance.GetType().GetField("path", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                         string caminhoDoSave = campoPath?.GetValue(defaultSettingsInstance) as string;
 
                         if (!string.IsNullOrEmpty(caminhoDoSave))
@@ -184,10 +160,37 @@ namespace ExportStatsSupermarketTogether
                         }
                     }
                 }
+
+                // Verificação Dinâmica Secundária: Vasculha instâncias de buffers criadas na RAM pelo compilador do jogo
+                Type tipoES3 = Type.GetType("ES3, Assembly-CSharp-firstpass") ?? Type.GetType("ES3, Assembly-CSharp");
+                if (tipoES3 != null)
+                {
+                    // Tenta rastrear assinaturas de buffers de gravação em execução na RAM
+                    MethodInfo[] metodos = tipoES3.GetMethods(BindingFlags.Public | BindingFlags.Static);
+                    foreach (var metodo in metodos)
+                    {
+                        if (metodo.Name == "GetKeys" || metodo.Name == "GetFiles")
+                        {
+                            ParameterInfo[] parametros = metodo.GetParameters();
+                            if (parametros.Length > 0 && parametros[0].ParameterType == typeof(string))
+                            {
+                                // O Easy Save armazena a rota de cache/buffer internamente aqui
+                                string rotaCache = metodo.Invoke(null, new object[] { "" }) as string;
+                                if (!string.IsNullOrEmpty(rotaCache))
+                                {
+                                    foreach (char c in rotaCache)
+                                    {
+                                        if (char.IsDigit(c)) return int.Parse(c.ToString());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             catch { }
 
-            return 0; // Fallback padrão agora é o Slot 0 de segurança
+            return 0; // Fallback seguro (Slot 0) se nenhuma rota for encontrada no buffer profundo
         }
 
         private Dictionary<string, string> ColetarEMatematizarDados(Type tipoStats, object instance)
