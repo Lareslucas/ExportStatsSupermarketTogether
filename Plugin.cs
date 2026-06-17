@@ -16,7 +16,7 @@ namespace ExportStatsSupermarketTogether
         private static ExportStatsPlugin Instance;
         private float ultimoTempoAutoSaveConhecido = -1f;
         
-        // 🚨 VARIÁVEL DE ELITE: Guarda o Slot real capturado no carregamento e impede o fallback pro Slot 3
+        // Guarda o Slot real capturado no carregamento
         private static int SlotIdentificadoNoCarregamento = -1;
 
         private void Awake()
@@ -26,7 +26,26 @@ namespace ExportStatsSupermarketTogether
             try
             {
                 var harmony = new Harmony("com.lucas.supermarket.exportstats");
+                
+                // Aplica os ganchos padrões do arquivo automaticamente
                 harmony.PatchAll();
+
+                // 🚨 GANCHO DINÂMICO AUTOMÁTICO: Localiza e intercepta o SaveManager sem quebrar o compilador
+                Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
+                if (tipoSaveManager != null)
+                {
+                    MethodInfo metodoLoad = tipoSaveManager.GetMethod("LoadGame", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+                    MethodInfo metodoSetSlot = tipoSaveManager.GetMethod("SetCurrentSlot", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+                    
+                    MethodInfo prefixoGenerico = typeof(ExportStatsPlugin).GetMethod(nameof(CapturarSlotDoSaveManager), BindingFlags.NonPublic | BindingFlags.Static);
+
+                    if (metodoLoad != null && prefixoGenerico != null)
+                        harmony.Patch(metodoLoad, prefix: new HarmonyMethod(prefixoGenerico));
+                        
+                    if (metodoSetSlot != null && prefixoGenerico != null)
+                        harmony.Patch(metodoSetSlot, prefix: new HarmonyMethod(prefixoGenerico));
+                }
+
                 Logger.LogInfo("=== BANCO DE DADOS EXTERNO INICIALIZADO (MODO APENAS LEITURA ATIVO) ===");
             }
             catch (Exception ex)
@@ -35,22 +54,19 @@ namespace ExportStatsSupermarketTogether
             }
         }
 
-        // INTERCEPTAÇÃO CIRÚRGICA 1: Captura o slot na tela de seleção de arquivos do SaveManager
-        [HarmonyPatch(typeof(SaveManager), "LoadGame")]
-        [HarmonyPrefix]
-        public static void Prefix_LoadGame(int slotIndex)
+        // Método que recebe o primeiro argumento numérico enviado pelo jogo (seja o slotIndex ou slot)
+        private static void CapturarSlotDoSaveManager(object[] __args)
         {
-            SlotIdentificadoNoCarregamento = slotIndex;
-            Instance?.Logger.LogInfo($"[Gatilho Crítico] Identificado carregamento de partida. Slot Selecionado: {slotIndex}");
-        }
-
-        // INTERCEPTAÇÃO CIRÚRGICA 2: Captura alternativa caso o jogo chame pelo índice de listagem
-        [HarmonyPatch(typeof(SaveManager), "SetCurrentSlot")]
-        [HarmonyPrefix]
-        public static void Prefix_SetCurrentSlot(int slot)
-        {
-            SlotIdentificadoNoCarregamento = slot;
-            Instance?.Logger.LogInfo($"[Gatilho Crítico] SaveManager alterou slot ativo para: {slot}");
+            try
+            {
+                if (__args != null && __args.Length > 0)
+                {
+                    int slotDetectado = Convert.ToInt32(__args[0]);
+                    SlotIdentificadoNoCarregamento = slotDetectado;
+                    Instance?.Logger.LogInfo($"[Gatilho Dinâmico] Slot interceptado com sucesso na RAM: {slotDetectado}");
+                }
+            }
+            catch { }
         }
 
         private void Update()
@@ -114,7 +130,6 @@ namespace ExportStatsSupermarketTogether
                     diaAtual -= 1;
                 }
 
-                // Captura o slot dinamicamente usando nossa variável blindada
                 int slotAtivo = ObterSlotRealDinamico();
 
                 string pastaBackupMod = Path.Combine(Paths.PluginPath, "ExportStatsSupermarketTogether", "BackupStats");
@@ -125,7 +140,7 @@ namespace ExportStatsSupermarketTogether
 
                 GravarNoBancoDeDadosJson(rotaJsonMetricas, slotAtivo, diaAtual, dadosProntos);
                 
-                Logger.LogInfo($"[Sucesso] Banco de dados atualizado. Slot {slotAtivo} | Registro do Dia {diaAtual} guardado com precisão.");
+                Logger.LogInfo($"[Sucesso] Banco de dados updated. Slot {slotAtivo} | Registro do Dia {diaAtual} guardado.");
             }
             catch (Exception ex)
             {
@@ -150,7 +165,6 @@ namespace ExportStatsSupermarketTogether
 
         private int ObterSlotRealDinamico()
         {
-            // 1. Prioridade Máxima: Se o Mod pegou o clique no carregamento, usa ele!
             if (SlotIdentificadoNoCarregamento != -1)
             {
                 return SlotIdentificadoNoCarregamento;
@@ -158,7 +172,6 @@ namespace ExportStatsSupermarketTogether
 
             try
             {
-                // 2. Segunda opção: Tenta ler o nome do arquivo ativo nas instâncias do EasySave
                 Type tipoES3Settings = Type.GetType("ES3Settings, Assembly-CSharp-firstpass") ?? Type.GetType("ES3Settings, Assembly-CSharp");
                 if (tipoES3Settings != null)
                 {
@@ -184,7 +197,6 @@ namespace ExportStatsSupermarketTogether
                     }
                 }
 
-                // 3. Terceira opção: Tenta ler do SaveManager físico nativo
                 Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
                 object saveInstance = tipoSaveManager?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
                 if (saveInstance != null)
@@ -195,7 +207,7 @@ namespace ExportStatsSupermarketTogether
             }
             catch { }
             
-            return 0; // 🚨 MUDANÇA: O fallback padrão agora é o Slot 0 para evitar o erro do Slot 3 fantasma!
+            return 0; // Fallback padrão agora é o Slot 0
         }
 
         private Dictionary<string, string> ColetarEMatematizarDados(Type tipoStats, object instance)
