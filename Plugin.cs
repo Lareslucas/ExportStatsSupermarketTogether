@@ -60,36 +60,47 @@ namespace ExportStatsSupermarketTogether
         {
             try
             {
-                // 1. Captura o Dia Atual de forma blindada analisando o SaveBehaviour ativo na RAM
-                Type tipoSaveBehaviour = typeof(SaveBehaviour);
-                object saveBehaviourInstance = GameObject.FindObjectOfType<SaveBehaviour>();
+                // 1. Localiza a instância ativa do gerenciador de estatísticas na memória RAM
+                Type tipoStats = Type.GetType("StatisticsManager, Assembly-CSharp");
+                object statsInstance = tipoStats?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
                 
-                int diaAtual = -1;
-
-                if (saveBehaviourInstance != null)
+                if (statsInstance == null)
                 {
-                    // Tenta buscar a variável gameData de dentro do salvamento ativo
-                    var campoGameData = tipoSaveBehaviour.GetField("gameData", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    object gameDataInstance = campoGameData?.GetValue(saveBehaviourInstance);
-
-                    if (gameDataInstance != null)
-                    {
-                        var campoGameDay = gameDataInstance.GetType().GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-                        diaAtual = Convert.ToInt32(campoGameDay?.GetValue(gameDataInstance) ?? -1);
-                    }
-                }
-
-                // Se o jogo ainda não carregou o dia na RAM, aborta silenciosamente para não dar erro crashar
-                if (diaAtual == -1)
-                {
-                    Logger.LogWarning("[Aviso] O dia atual ainda não foi inicializado pelo jogo. Aguarde o supermercado carregar por completo.");
+                    Logger.LogWarning("[Aviso] O StatisticsManager ainda não foi instanciado. Aguarde o jogo carregar por completo.");
                     return;
                 }
 
-                // 2. Localiza as estatísticas acumuladas na memória RAM (StatisticsManager)
-                Type tipoStats = Type.GetType("StatisticsManager, Assembly-CSharp");
-                object statsInstance = tipoStats?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-                if (statsInstance == null) return;
+                // 2. Captura o Dia Atual de forma blindada direto do GameData que está vinculado ao Save do jogo
+                int diaAtual = -1;
+                Type tipoGameData = Type.GetType("GameData, Assembly-CSharp");
+                
+                // Tenta localizar qualquer objeto ativo de gerenciamento de dados que o Unity gerou na cena
+                object gameDataInstance = GameObject.FindObjectOfType(tipoGameData);
+
+                if (gameDataInstance != null)
+                {
+                    var campoGameDay = tipoGameData.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (campoGameDay != null)
+                    {
+                        diaAtual = Convert.ToInt32(campoGameDay.GetValue(gameDataInstance));
+                    }
+                }
+                else
+                {
+                    // Segunda tentativa: Tenta extrair o dia de forma estática pura caso o motor use persistência singleton
+                    var campoEstaticoDay = tipoGameData?.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                    if (campoEstaticoDay != null)
+                    {
+                        diaAtual = Convert.ToInt32(campoEstaticoDay.GetValue(null));
+                    }
+                }
+
+                // Proteção final: Se mesmo assim não achar o dia atual da sessão, assume o dia 1 para não perder o backup
+                if (diaAtual <= 0)
+                {
+                    diaAtual = 1;
+                    Logger.LogWarning("[Aviso] Não foi possível ler o dia real da RAM. Usando ponteiro padrão (Dia 1) para o backup.");
+                }
 
                 // 3. Captura o slot de salvamento ativo (X) analisando o SaveManager nativo
                 int slotAtivo = 3; 
@@ -128,7 +139,7 @@ namespace ExportStatsSupermarketTogether
 
                 // 6. GRAVAÇÃO 2: Salva no arquivo de Backup Espelho (.json) isolado e seguro
                 SalvarBackupJsonSeguro(rotaBackupSeguro, diaAtual, dadosDia);
-                Logger.LogInfo($"[Sucesso] Gravação 2 (Espelho Seguro) atualizada na pasta do mod.");
+                Logger.LogInfo($"[Sucesso] Gravação 2 (Espelho Seguro) atualizada na pasta do mod. (Dia: {diaAtual})");
             }
             catch (Exception ex)
             {
