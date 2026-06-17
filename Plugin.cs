@@ -23,7 +23,7 @@ namespace ExportStatsSupermarketTogether
             {
                 var harmony = new Harmony("com.lucas.supermarket.exportstats");
                 harmony.PatchAll();
-                Logger.LogInfo("=== MOD EXPORT STATS INICIALIZADO COM SUCESSO (SISTEMA AUTOMÁTICO ATIVO) ===");
+                Logger.LogInfo("=== MOD EXPORT STATS INICIALIZADO COM SUCESSO (SISTEMA DE BLOQUEIO NATIVO ATIVO) ===");
             }
             catch (Exception ex)
             {
@@ -36,73 +36,80 @@ namespace ExportStatsSupermarketTogether
             if (Input.GetKeyDown(KeyCode.F10))
             {
                 Logger.LogInfo("[F10] Disparando rotina forçada de backup de estatísticas...");
-                ProcessarEExecutarSalvamentoDuplo();
+                ProcessarEExecutarSalvamentoDuplo(false); // F10 salva o dia atual da gameplay
             }
         }
 
+        // Intercepta o salvamento automático de 5 em 5 minutos
         [HarmonyPatch(typeof(SaveBehaviour), "SavePersistentValues")]
         [HarmonyPostfix]
         public static void Postfix_SavePersistentValues()
         {
             Instance?.Logger.LogInfo("[Mod Auto-Save] Ciclo de salvamento detectado no jogo. Sincronizando estatísticas...");
-            Instance?.ProcessarEExecutarSalvamentoDuplo();
+            Instance?.ProcessarEExecutarSalvamentoDuplo(false);
         }
 
+        // 🚨 O BLOQUEADOR MÁGICO: Intercepta o fim do dia ANTES de o jogo salvar errado
         [HarmonyPatch(typeof(StatisticsManager), "SaveStatistics")]
-        [HarmonyPostfix]
-        public static void Postfix_SaveStatistics()
+        [HarmonyPrefix]
+        public static bool Prefix_SaveStatistics()
         {
-            Instance?.Logger.LogInfo("[Mod End-Day] Fim de dia detectado. Congelando dados do dia anterior...");
-            Instance?.ProcessarEExecutarSalvamentoDuplo();
+            Instance?.Logger.LogInfo("[Mod Bloqueador] O jogo tentou salvar as estatísticas de forma instável. Barrando e assumindo o controle...");
+            
+            // Roda o salvamento forçando a correção do dia retroativo (fim de dia real)
+            Instance?.ProcessarEExecutarSalvamentoDuplo(true);
+            
+            // RETORNA FALSO: Diz ao Unity para IGNORAR a função nativa do jogo. Conflito anulado!
+            return false;
         }
 
-        private void ProcessarEExecutarSalvamentoDuplo()
+        private void ProcessarEExecutarSalvamentoDuplo(bool ehFimDeDia)
         {
             try
             {
-                // 1. Localiza a instância ativa do gerenciador de estatísticas na memória RAM
+                // 1. Localiza a instância ativa do StatisticsManager na memória RAM
                 Type tipoStats = Type.GetType("StatisticsManager, Assembly-CSharp");
                 object statsInstance = tipoStats?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
                 
-                if (statsInstance == null)
-                {
-                    Logger.LogWarning("[Aviso] O StatisticsManager ainda não foi instanciado. Aguarde o jogo carregar por completo.");
-                    return;
-                }
+                if (statsInstance == null) return;
 
-                // 2. Captura o Dia Atual de forma blindada direto do GameData que está vinculado ao Save do jogo
+                // 2. Captura o Dia Atual do motor de jogo de forma estática ou dinâmica
                 int diaAtual = -1;
                 Type tipoGameData = Type.GetType("GameData, Assembly-CSharp");
-                
-                // Tenta localizar qualquer objeto ativo de gerenciamento de dados que o Unity gerou na cena
                 object gameDataInstance = GameObject.FindObjectOfType(tipoGameData);
 
                 if (gameDataInstance != null)
                 {
                     var campoGameDay = tipoGameData.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (campoGameDay != null)
-                    {
-                        diaAtual = Convert.ToInt32(campoGameDay.GetValue(gameDataInstance));
-                    }
+                    if (campoGameDay != null) diaAtual = Convert.ToInt32(campoGameDay.GetValue(gameDataInstance));
                 }
-                else
-                {
-                    // Segunda tentativa: Tenta extrair o dia de forma estática pura caso o motor use persistência singleton
-                    var campoEstaticoDay = tipoGameData?.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                    if (campoEstaticoDay != null)
-                    {
-                        diaAtual = Convert.ToInt32(campoEstaticoDay.GetValue(null));
-                    }
-                }
-
-                // Proteção final: Se mesmo assim não achar o dia atual da sessão, assume o dia 1 para não perder o backup
+                
                 if (diaAtual <= 0)
                 {
-                    diaAtual = 1;
-                    Logger.LogWarning("[Aviso] Não foi possível ler o dia real da RAM. Usando ponteiro padrão (Dia 1) para o backup.");
+                    var campoEstaticoDay = tipoGameData?.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                    if (campoEstaticoDay != null) diaAtual = Convert.ToInt32(campoEstaticoDay.GetValue(null));
                 }
 
-                // 3. Captura o slot de salvamento ativo (X) analisando o SaveManager nativo
+                // Se falhar em tudo, tenta ler do verificador auxiliar do próprio jogo
+                if (diaAtual <= 0)
+                {
+                    Type tipoCheck = Type.GetType("CheckIfAutosaveExists, Assembly-CSharp");
+                    var campoFileDay = tipoCheck?.GetField("fileDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                    if (campoFileDay != null) diaAtual = Convert.ToInt32(campoFileDay.GetValue(null));
+                }
+
+                // Se mesmo assim não achar o dia atual da sessão, assume o dia 1 de segurança
+                if (diaAtual <= 0) diaAtual = 1;
+
+                // CORREÇÃO DO BUG DO JOGO: Se for fim de dia e o jogo já pulou o relógio para o dia seguinte,
+                // nós salvamos os dados acumulados no dia correto (anterior).
+                if (ehFimDeDia && diaAtual > 1)
+                {
+                    Logger.LogInfo($"[Correção] Aplicando recuo de ponteiro: Corrigindo dados salvos de Dia {diaAtual} para Dia {diaAtual - 1}.");
+                    diaAtual = diaAtual - 1;
+                }
+
+                // 3. Captura o slot de salvamento ativo (X)
                 int slotAtivo = 3; 
                 Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
                 if (tipoSaveManager != null)
@@ -112,7 +119,7 @@ namespace ExportStatsSupermarketTogether
                     if (slotDinamico.HasValue) slotAtivo = slotDinamico.Value;
                 }
 
-                // Configura as rotas dos dois arquivos independentes de gravação
+                // Configura as rotas
                 string nomeArquivoSave = $"StoreFile{slotAtivo}stats.es3";
                 string pastaSavesJogo = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "..", "LocalLow", "Nokta Games", "Supermarket Together");
                 string rotaSaveOficial = Path.Combine(pastaSavesJogo, nomeArquivoSave);
@@ -121,10 +128,10 @@ namespace ExportStatsSupermarketTogether
                 if (!Directory.Exists(pastaBackupMod)) Directory.CreateDirectory(pastaBackupMod);
                 string rotaBackupSeguro = Path.Combine(pastaBackupMod, $"Backup_{nomeArquivoSave}.json");
 
-                // 4. Empacota os valores de todas as variáveis do StatisticsManager
+                // 4. Empacota todas as variáveis de estatísticas
                 Dictionary<string, string> dadosDia = PackValoresEstatisticas(tipoStats, statsInstance);
 
-                // 5. GRAVAÇÃO 1: Injeta diretamente no save oficial (.es3) usando o motor do jogo
+                // 5. EFETUA A SELEÇÃO DE GRAVAÇÃO DIRETA NO SAVE DO JOGO
                 Type tipoES3 = Type.GetType("ES3, Assembly-CSharp-firstpass") ?? Type.GetType("ES3, Assembly-CSharp");
                 if (tipoES3 != null)
                 {
@@ -134,16 +141,16 @@ namespace ExportStatsSupermarketTogether
                         string chaveComDia = $"day{diaAtual}stat{par.Key}";
                         metodoSaveStr?.Invoke(null, new object[] { chaveComDia, par.Value, rotaSaveOficial });
                     }
-                    Logger.LogInfo($"[Sucesso] Gravação 1 injetada no save oficial do slot {slotAtivo}.");
+                    Logger.LogInfo($"[Sucesso] Gravação 1 Corrigida Injetada no arquivo nativo .es3 do slot {slotAtivo}.");
                 }
 
-                // 6. GRAVAÇÃO 2: Salva no arquivo de Backup Espelho (.json) isolado e seguro
+                // 6. GRAVAÇÃO 2: Salva no Backup Seguro (.json)
                 SalvarBackupJsonSeguro(rotaBackupSeguro, diaAtual, dadosDia);
-                Logger.LogInfo($"[Sucesso] Gravação 2 (Espelho Seguro) atualizada na pasta do mod. (Dia: {diaAtual})");
+                Logger.LogInfo($"[Sucesso] Gravação 2 (Espelho Seguro) guardada na pasta do mod. Dia Alvo: {diaAtual}");
             }
             catch (Exception ex)
             {
-                Logger.LogError("Erro crítico na execução do salvamento duplo: " + ex.Message);
+                Logger.LogError("Erro crítico na execução do salvamento duplo/bloqueio: " + ex.Message);
             }
         }
 
