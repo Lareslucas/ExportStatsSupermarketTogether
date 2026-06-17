@@ -14,6 +14,7 @@ namespace ExportStatsSupermarketTogether
     public class ExportStatsPlugin : BaseUnityPlugin
     {
         private static ExportStatsPlugin Instance;
+        private float ultimoTempoAutoSaveConhecido = -1f;
 
         private void Awake()
         {
@@ -23,7 +24,7 @@ namespace ExportStatsSupermarketTogether
             {
                 var harmony = new Harmony("com.lucas.supermarket.exportstats");
                 harmony.PatchAll();
-                Logger.LogInfo("=== MOD EXPORT STATS INICIALIZADO COM SUCESSO (SISTEMA DE BLOQUEIO NATIVO ATIVO) ===");
+                Logger.LogInfo("=== BANCO DE DADOS EXTERNO INICIALIZADO (MODO APENAS LEITURA ATIVO) ===");
             }
             catch (Exception ex)
             {
@@ -33,130 +34,126 @@ namespace ExportStatsSupermarketTogether
 
         private void Update()
         {
+            // 1. Gatilho Manual: Tecla F10
             if (Input.GetKeyDown(KeyCode.F10))
             {
-                Logger.LogInfo("[F10] Disparando rotina forçada de backup de estatísticas...");
-                ProcessarEExecutarSalvamentoDuplo(false); // F10 salva o dia atual da gameplay
+                Logger.LogInfo("[F10] Disparando captura manual para o Banco de Dados...");
+                ExecutarFluxoDeCapturaGeral(false);
             }
+
+            // 2. Gatilho Sombra: Sincronização em tempo real com o Auto-Save do Jogo
+            VerificarSincroniaAutoSaveJogo();
         }
 
-        // Intercepta o salvamento automático de 5 em 5 minutos
-        [HarmonyPatch(typeof(SaveBehaviour), "SavePersistentValues")]
-        [HarmonyPostfix]
-        public static void Postfix_SavePersistentValues()
-        {
-            Instance?.Logger.LogInfo("[Mod Auto-Save] Ciclo de salvamento detectado no jogo. Sincronizando estatísticas...");
-            Instance?.ProcessarEExecutarSalvamentoDuplo(false);
-        }
-
-        // 🚨 O BLOQUEADOR MÁGICO: Intercepta o fim do dia ANTES de o jogo salvar errado
+        // 3. Gatilho de Fim de Dia: Intercepta a virada de página do relatório do jogo
         [HarmonyPatch(typeof(StatisticsManager), "SaveStatistics")]
-        [HarmonyPrefix]
-        public static bool Prefix_SaveStatistics()
+        [HarmonyPostfix]
+        public static void Postfix_SaveStatistics()
         {
-            Instance?.Logger.LogInfo("[Mod Bloqueador] O jogo tentou salvar as estatísticas de forma instável. Barrando e assumindo o controle...");
-            
-            // Roda o salvamento forçando a correção do dia retroativo (fim de dia real)
-            Instance?.ProcessarEExecutarSalvamentoDuplo(true);
-            
-            // RETORNA FALSO: Diz ao Unity para IGNORAR a função nativa do jogo. Conflito anulado!
-            return false;
+            Instance?.Logger.LogInfo("[Fim de Dia] Mercado fechado. Capturando fechamento do dia com centavos corrigidos...");
+            Instance?.ExecutarFluxoDeCapturaGeral(true);
         }
 
-        private void ProcessarEExecutarSalvamentoDuplo(bool ehFimDeDia)
+        private void VerificarSincroniaAutoSaveJogo()
         {
             try
             {
-                // 1. Localiza a instância ativa do StatisticsManager na memória RAM
-                Type tipoStats = Type.GetType("StatisticsManager, Assembly-CSharp");
-                object statsInstance = tipoStats?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-                
-                if (statsInstance == null) return;
-
-                // 2. Captura o Dia Atual do motor de jogo de forma estática ou dinâmica
-                int diaAtual = -1;
                 Type tipoGameData = Type.GetType("GameData, Assembly-CSharp");
+                if (tipoGameData == null) return;
+
                 object gameDataInstance = GameObject.FindObjectOfType(tipoGameData);
+                if (gameDataInstance == null) return;
 
-                if (gameDataInstance != null)
-                {
-                    var campoGameDay = tipoGameData.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (campoGameDay != null) diaAtual = Convert.ToInt32(campoGameDay.GetValue(gameDataInstance));
-                }
-                
-                if (diaAtual <= 0)
-                {
-                    var campoEstaticoDay = tipoGameData?.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                    if (campoEstaticoDay != null) diaAtual = Convert.ToInt32(campoEstaticoDay.GetValue(null));
-                }
+                var campoAutoSave = tipoGameData.GetField("nextAutosaveTime", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+                if (campoAutoSave == null) return;
 
-                // Se falhar em tudo, tenta ler do verificador auxiliar do próprio jogo
-                if (diaAtual <= 0)
+                float tempoAtualAutoSave = Convert.ToSingle(campoAutoSave.GetValue(gameDataInstance));
+
+                // Se o tempo atual for maior que o anterior, significa que o jogo acabou de resetar o cronômetro (Auto-save rodou!)
+                if (ultimoTempoAutoSaveConhecido != -1f && tempoAtualAutoSave > ultimoTempoAutoSaveConhecido)
                 {
-                    Type tipoCheck = Type.GetType("CheckIfAutosaveExists, Assembly-CSharp");
-                    var campoFileDay = tipoCheck?.GetField("fileDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                    if (campoFileDay != null) diaAtual = Convert.ToInt32(campoFileDay.GetValue(null));
+                    Logger.LogInfo("[Sincronia Sombra] Auto-save do jogo detectado! Sincronizando banco de dados externo imediatamente...");
+                    ExecutarFluxoDeCapturaGeral(false);
                 }
 
-                // Se mesmo assim não achar o dia atual da sessão, assume o dia 1 de segurança
-                if (diaAtual <= 0) diaAtual = 1;
-
-                // CORREÇÃO DO BUG DO JOGO: Se for fim de dia e o jogo já pulou o relógio para o dia seguinte,
-                // nós salvamos os dados acumulados no dia correto (anterior).
-                if (ehFimDeDia && diaAtual > 1)
-                {
-                    Logger.LogInfo($"[Correção] Aplicando recuo de ponteiro: Corrigindo dados salvos de Dia {diaAtual} para Dia {diaAtual - 1}.");
-                    diaAtual = diaAtual - 1;
-                }
-
-                // 3. Captura o slot de salvamento ativo (X)
-                int slotAtivo = 3; 
-                Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
-                if (tipoSaveManager != null)
-                {
-                    object saveInstance = tipoSaveManager.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-                    int? slotDinamico = saveInstance?.GetType().GetField("currentSlot", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(saveInstance) as int?;
-                    if (slotDinamico.HasValue) slotAtivo = slotDinamico.Value;
-                }
-
-                // Configura as rotas
-                string nomeArquivoSave = $"StoreFile{slotAtivo}stats.es3";
-                string pastaSavesJogo = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "..", "LocalLow", "Nokta Games", "Supermarket Together");
-                string rotaSaveOficial = Path.Combine(pastaSavesJogo, nomeArquivoSave);
-
-                string pastaBackupMod = Path.Combine(Paths.PluginPath, "ExportStatsSupermarketTogether", "BackupStats");
-                if (!Directory.Exists(pastaBackupMod)) Directory.CreateDirectory(pastaBackupMod);
-                string rotaBackupSeguro = Path.Combine(pastaBackupMod, $"Backup_{nomeArquivoSave}.json");
-
-                // 4. Empacota todas as variáveis de estatísticas
-                Dictionary<string, string> dadosDia = PackValoresEstatisticas(tipoStats, statsInstance);
-
-                // 5. EFETUA A SELEÇÃO DE GRAVAÇÃO DIRETA NO SAVE DO JOGO
-                Type tipoES3 = Type.GetType("ES3, Assembly-CSharp-firstpass") ?? Type.GetType("ES3, Assembly-CSharp");
-                if (tipoES3 != null)
-                {
-                    MethodInfo metodoSaveStr = tipoES3.GetMethod("Save", new Type[] { typeof(string), typeof(object), typeof(string) });
-                    foreach (var par in dadosDia)
-                    {
-                        string chaveComDia = $"day{diaAtual}stat{par.Key}";
-                        metodoSaveStr?.Invoke(null, new object[] { chaveComDia, par.Value, rotaSaveOficial });
-                    }
-                    Logger.LogInfo($"[Sucesso] Gravação 1 Corrigida Injetada no arquivo nativo .es3 do slot {slotAtivo}.");
-                }
-
-                // 6. GRAVAÇÃO 2: Salva no Backup Seguro (.json)
-                SalvarBackupJsonSeguro(rotaBackupSeguro, diaAtual, dadosDia);
-                Logger.LogInfo($"[Sucesso] Gravação 2 (Espelho Seguro) guardada na pasta do mod. Dia Alvo: {diaAtual}");
+                ultimoTempoAutoSaveConhecido = tempoAtualAutoSave;
             }
-            catch (Exception ex)
-            {
-                Logger.LogError("Erro crítico na execução do salvamento duplo/bloqueio: " + ex.Message);
+            catch { // Silencioso no Update para não poluir a tela
             }
         }
 
-        private Dictionary<string, string> PackValoresEstatisticas(Type tipoStats, object instance)
+        private void ExecutarFluxoDeCapturaGeral(bool ehFimDeDia)
+        {
+            try
+            {
+                // Localiza o StatisticsManager na RAM
+                Type tipoStats = Type.GetType("StatisticsManager, Assembly-CSharp");
+                object statsInstance = tipoStats?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                if (statsInstance == null) return;
+
+                // Captura o dia atual da gameplay ativa
+                int diaAtual = ObterDiaAtualDaSessao();
+                if (diaAtual <= 0) return;
+
+                // Correção de Ponteiro: Se for fim de dia e o jogo pulou o dia prematuramente, recuamos 1 dia para salvar na gaveta certa
+                if (ehFimDeDia && diaAtual > 1)
+                {
+                    diaAtual -= 1;
+                }
+
+                // Captura o slot ativo do save (0 a 4)
+                int slotAtivo = ObterSlotSaveAtivo();
+
+                // Define a rota limpa do arquivo .json na pasta do mod
+                string pastaBackupMod = Path.Combine(Paths.PluginPath, "ExportStatsSupermarketTogether", "BackupStats");
+                if (!Directory.Exists(pastaBackupMod)) Directory.CreateDirectory(pastaBackupMod);
+                string rotaJsonMetricas = Path.Combine(pastaBackupMod, $"Backup_StoreFile{slotAtivo}stats.json");
+
+                // Coleta todos os dados nativos e processa a correção matemática dos centavos
+                Dictionary<string, string> dadosProntos = ColetarEMatematizarDados(tipoStats, statsInstance);
+
+                // Grava de forma cumulativa sem apagar os dias anteriores
+                GravarNoBancoDeDadosJson(rotaJsonMetricas, slotAtivo, diaAtual, dadosProntos);
+                
+                Logger.LogInfo($"[Sucesso] Banco de dados atualizado. Registro do Dia {diaAtual} guardado com precisão.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("Erro crítico no fluxo do banco de dados: " + ex.Message);
+            }
+        }
+
+        private int ObterDiaAtualDaSessao()
+        {
+            try
+            {
+                Type tipoGameData = Type.GetType("GameData, Assembly-CSharp");
+                object gameDataInstance = GameObject.FindObjectOfType(tipoGameData);
+                if (gameDataInstance != null)
+                {
+                    return Convert.ToInt32(tipoGameData.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(gameDataInstance));
+                }
+                return Convert.ToInt32(tipoGameData?.GetField("gameDay", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null) ?? -1);
+            }
+            catch { return -1; }
+        }
+
+        private int ObterSlotSaveAtivo()
+        {
+            try
+            {
+                Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
+                object saveInstance = tipoSaveManager?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                return (saveInstance?.GetType().GetField("currentSlot", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(saveInstance) as int?) ?? 3;
+            }
+            catch { return 3; }
+        }
+
+        private Dictionary<string, string> ColetarEMatematizarDados(Type tipoStats, object instance)
         {
             Dictionary<string, string> dict = new Dictionary<string, string>();
+            
+            // 1. Variáveis Gerais Nativas
             string[] camposSimples = {
                 "customers", "benefits", "franchiseExperience", "timesRobbed", "moneySpentOnProducts",
                 "notFoundProductsCount", "tooExpensiveProductsCount", "lightCost", "rentCost", "employeesCost",
@@ -172,29 +169,187 @@ namespace ExportStatsSupermarketTogether
                 var campo = tipoStats.GetField(nomeCampo, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 dict[nomeCampo] = campo?.GetValue(instance)?.ToString() ?? "0";
             }
+
+            // 2. CORREÇÃO DOS CENTAVOS (Listas de Produtos de Alta Precisão)
+            ProcessarListasComCentavosReais(tipoStats, instance, dict);
+
             return dict;
         }
 
-        private void SalvarBackupJsonSeguro(string rota, int dia, Dictionary<string, string> novosDados)
+        private void ProcessarListasComCentavosReais(Type tipoStats, object statsInstance, Dictionary<string, string> dict)
         {
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine("{");
-            sb.AppendLine($"  \"Ultima_Atualizacao\": \"{DateTime.Now:dd/MM/yyyy HH:mm:ss}\",");
-            sb.AppendLine($"  \"Dia_Atual_Ativo\": {dia},");
-            sb.AppendLine($"  \"Estatisticas_Dia_{dia}\": {{");
-            
-            int total = novosDados.Count;
-            int cont = 0;
-            foreach(var kvp in novosDados)
+            try
             {
-                cont++;
-                string sufixo = (cont < total) ? "," : "";
-                sb.AppendLine($"    \"day{dia}stat{kvp.Key}\": \"{kvp.Value}\"{sufixo}");
+                // Extrai as listas nativas de quantidades do jogo
+                var listaVendidos = tipoStats.GetField("productsSoldList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(statsInstance) as IList;
+                var listaComprados = tipoStats.GetField("productsAcquiredList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(statsInstance) as IList;
+
+                // Localiza a tabela de preços do jogo (Market ou ProductManager dependendo da build)
+                Type tipoProductManager = Type.GetType("ProductManager, Assembly-CSharp") ?? Type.GetType("MarketManager, Assembly-CSharp");
+                object pmInstance = tipoProductManager?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+
+                StringBuilder sbVendidos = new StringBuilder("[");
+                StringBuilder sbComprados = new StringBuilder("[");
+                StringBuilder sbReceitaReal = new StringBuilder("[");
+                StringBuilder sbCustoReal = new StringBuilder("[");
+
+                if (listaVendidos != null && pmInstance != null)
+                {
+                    // O jogo possui uma lista dinâmica de preços reais do tipo float/decimal indexada por ID de produto
+                    var campoPrecosVenda = pmInstance.GetType().GetField("productPrices", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance) 
+                                        ?? pmInstance.GetType().GetField("prices", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    
+                    var campoPrecosCusto = pmInstance.GetType().GetField("productCosts", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                        ?? pmInstance.GetType().GetField("costs", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+                    IList tabelaPrecos = campoPrecosVenda?.GetValue(pmInstance) as IList;
+                    IList tabelaCost = campoPrecosCusto?.GetValue(pmInstance) as IList;
+
+                    for (int i = 0; i < listaVendidos.Count; i++)
+                    {
+                        int qtdVendida = Convert.ToInt32(listaVendidos[i]);
+                        int qtdComprada = (listaComprados != null && i < listaComprados.Count) ? Convert.ToInt32(listaComprados[i]) : 0;
+
+                        float precoVendaItem = 1.0f;
+                        float precoCustoItem = 1.0f;
+
+                        // Puxa o preço real flutuante da RAM com os centavos
+                        if (tabelaPrecos != null && i < tabelaPrecos.Count) precoVendaItem = Convert.ToSingle(tabelaPrecos[i]);
+                        if (tabelaCost != null && i < tabelaCost.Count) precoCustoItem = Convert.ToSingle(tabelaCost[i]);
+
+                        // Executa a multiplicação matemática corrigindo o erro do jogo
+                        float receitaRealCalculada = qtdVendida * precoVendaItem;
+                        float custoRealCalculado = qtdComprada * precoCustoItem;
+
+                        sbVendidos.Append(qtdVendida + (i < listaVendidos.Count - 1 ? "," : ""));
+                        sbComprados.Append(qtdComprada + (i < listaVendidos.Count - 1 ? "," : ""));
+                        
+                        // Injeta os valores corretos com string formatada em ponto flutuante americano para o Excel ler
+                        sbReceitaReal.Append(receitaRealCalculada.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + (i < listaVendidos.Count - 1 ? "," : ""));
+                        sbCustoReal.Append(custoRealCalculado.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + (i < listaVendidos.Count - 1 ? "," : ""));
+                    }
+                }
+
+                sbVendidos.Append("]");
+                sbComprados.Append("]");
+                sbReceitaReal.Append("]");
+                sbCustoReal.Append("]");
+
+                dict["productsSoldList"] = sbVendidos.ToString();
+                dict["productsAcquiredList"] = sbComprados.ToString();
+                dict["receita_real_produto_com_centavos"] = sbReceitaReal.ToString();
+                dict["custo_real_produto_com_centavos"] = sbCustoReal.ToString();
             }
-            
-            sb.AppendLine("  }");
-            sb.AppendLine("}");
-            File.WriteAllText(rota, sb.ToString(), Encoding.UTF8);
+            catch
+            {
+                dict["receita_real_produto_com_centavos"] = "[]";
+                dict["custo_real_produto_com_centavos"] = "[]";
+            }
         }
+
+        private void GravarNoBancoDeDadosJson(string rota, int slot, int dia, Dictionary<string, string> dadosDia)
+        {
+            Dictionary<string, Dictionary<string, object>> bancoCompleto = new Dictionary<string, Dictionary<string, object>>();
+
+            // Se o arquivo já existir, carrega ele para a memória para fazer o Append
+            if (File.Exists(rota))
+            {
+                try
+                {
+                    string conteudoAntigo = File.ReadAllText(rota);
+                    bancoCompleto = DeserializarJsonSimples(conteudoAntigo);
+                }
+                catch {
+                    bancoCompleto = new Dictionary<string, Dictionary<string, object>>();
+                }
+            }
+
+            // Monta o bloco do dia atual
+            Dictionary<string, object> blocoDia = new Dictionary<string, object>();
+            blocoDia["Ultima_Atualizacao"] = DateTime.Now.MakeValue(DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+
+            foreach (var par in dadosDia)
+            {
+                if (par.Value.StartsWith("[")) // Identifica se é uma lista para injetar sem aspas textuais
+                {
+                    blocoDia[par.Key] = par.Value;
+                }
+                else
+                {
+                    blocoDia[par.Key] = $"\"{par.Value}\"";
+                }
+            }
+
+            // Aloca o dia na gaveta correta da Linha do Tempo (Garante a ordem cronológica linear)
+            bancoCompleto[$"Dia_{dia}"] = blocoDia;
+
+            // Transforma o dicionário inteiro em um arquivo JSON identado e limpo
+            StringBuilder jsonFinal = new StringBuilder();
+            jsonFinal.AppendLine("{");
+            jsonFinal.AppendLine($"  \"Supermercado_Save_Slot\": {slot},");
+            jsonFinal.AppendLine("  \"Historico_Cronologico\": {");
+
+            int totalDias = bancoCompleto.Count;
+            int contDias = 0;
+
+            foreach (var diaChave in bancoCompleto)
+            {
+                contDias++;
+                jsonFinal.AppendLine($"    \"{diaChave.Key}\": {{");
+                
+                int totalCampos = diaChave.Value.Count;
+                int contCampos = 0;
+                foreach (var campo in diaChave.Value)
+                {
+                    contCampos++;
+                    string sufixo = (contCampos < totalCampos) ? "," : "";
+                    jsonFinal.AppendLine($"      \"{campo.Key}\": {campo.Value}{sufixo}");
+                }
+
+                string sufixoDia = (contDias < totalDias) ? "," : "";
+                jsonFinal.AppendLine($"    }}{sufixoDia}");
+            }
+
+            jsonFinal.AppendLine("  }");
+            jsonFinal.AppendLine("}");
+
+            File.WriteAllText(rota, jsonFinal.ToString(), Encoding.UTF8);
+        }
+
+        // Deserializador leve nativo para não exigir dependência de DLLs de terceiros no GitHub
+        private Dictionary<string, Dictionary<string, object>> DeserializarJsonSimples(string json)
+        {
+            var resultado = new Dictionary<string, Dictionary<string, object>>();
+            try
+            {
+                string[] linhas = json.Split(new[] { "\"Dia_" }, StringSplitOptions.None);
+                for (int i = 1; i < linhas.Length; i++)
+                {
+                    string blocoDia = linhas[i];
+                    string numDiaStr = blocoDia.Split('"')[0];
+                    int numDia = int.Parse(numDiaStr);
+
+                    var dadosDia = new Dictionary<string, object>();
+                    string[] campos = blocoDia.Split('\n');
+                    foreach (var campo in campos)
+                    {
+                        if (campo.Contains(":") && !campo.Contains("{") && !campo.Contains("}"))
+                        {
+                            string[] partes = campo.Split(new[] { ':' }, 2);
+                            string chave = partes[0].Replace("\"", "").Trim();
+                            string valor = partes[1].Trim().TrimEnd(',');
+                            dadosDia[chave] = valor;
+                        }
+                    }
+                    resultado[$"Dia_{numDia}"] = dadosDia;
+                }
+            }
+            catch {}
+            return resultado;
+        }
+    }
+
+    public static class ExtensionHelper {
+        public static string MakeValue(this DateTime dt, string val) => $"\"{val}\"";
     }
 }
