@@ -15,6 +15,9 @@ namespace ExportStatsSupermarketTogether
     {
         private static ExportStatsPlugin Instance;
         private float ultimoTempoAutoSaveConhecido = -1f;
+        
+        // 🚨 VARIÁVEL DE ELITE: Guarda o Slot real capturado no carregamento e impede o fallback pro Slot 3
+        private static int SlotIdentificadoNoCarregamento = -1;
 
         private void Awake()
         {
@@ -32,20 +35,35 @@ namespace ExportStatsSupermarketTogether
             }
         }
 
+        // INTERCEPTAÇÃO CIRÚRGICA 1: Captura o slot na tela de seleção de arquivos do SaveManager
+        [HarmonyPatch(typeof(SaveManager), "LoadGame")]
+        [HarmonyPrefix]
+        public static void Prefix_LoadGame(int slotIndex)
+        {
+            SlotIdentificadoNoCarregamento = slotIndex;
+            Instance?.Logger.LogInfo($"[Gatilho Crítico] Identificado carregamento de partida. Slot Selecionado: {slotIndex}");
+        }
+
+        // INTERCEPTAÇÃO CIRÚRGICA 2: Captura alternativa caso o jogo chame pelo índice de listagem
+        [HarmonyPatch(typeof(SaveManager), "SetCurrentSlot")]
+        [HarmonyPrefix]
+        public static void Prefix_SetCurrentSlot(int slot)
+        {
+            SlotIdentificadoNoCarregamento = slot;
+            Instance?.Logger.LogInfo($"[Gatilho Crítico] SaveManager alterou slot ativo para: {slot}");
+        }
+
         private void Update()
         {
-            // 1. Gatilho Manual (Teclado F10)
             if (Input.GetKeyDown(KeyCode.F10))
             {
                 Logger.LogInfo("[F10] Disparando captura manual para o Banco de Dados...");
                 ExecutarFluxoDeCapturaGeral(false);
             }
 
-            // 2. Gatilho Sombra (Monitoramento do Auto-save nativo do Jogo)
             VerificarSincroniaAutoSaveJogo();
         }
 
-        // 3. Gatilho de Fim de Dia
         [HarmonyPatch(typeof(StatisticsManager), "SaveStatistics")]
         [HarmonyPostfix]
         public static void Postfix_SaveStatistics()
@@ -96,8 +114,8 @@ namespace ExportStatsSupermarketTogether
                     diaAtual -= 1;
                 }
 
-                // Captura o Slot extraindo direto do arquivo que o motor de save está usando
-                int slotAtivo = ObterSlotPeloArquivoDeSaveReal();
+                // Captura o slot dinamicamente usando nossa variável blindada
+                int slotAtivo = ObterSlotRealDinamico();
 
                 string pastaBackupMod = Path.Combine(Paths.PluginPath, "ExportStatsSupermarketTogether", "BackupStats");
                 if (!Directory.Exists(pastaBackupMod)) Directory.CreateDirectory(pastaBackupMod);
@@ -130,11 +148,17 @@ namespace ExportStatsSupermarketTogether
             catch { return -1; }
         }
 
-        private int ObterSlotPeloArquivoDeSaveReal()
+        private int ObterSlotRealDinamico()
         {
+            // 1. Prioridade Máxima: Se o Mod pegou o clique no carregamento, usa ele!
+            if (SlotIdentificadoNoCarregamento != -1)
+            {
+                return SlotIdentificadoNoCarregamento;
+            }
+
             try
             {
-                // Acessa as configurações globais do Easy Save (ES3) que controlam o arquivo ativo
+                // 2. Segunda opção: Tenta ler o nome do arquivo ativo nas instâncias do EasySave
                 Type tipoES3Settings = Type.GetType("ES3Settings, Assembly-CSharp-firstpass") ?? Type.GetType("ES3Settings, Assembly-CSharp");
                 if (tipoES3Settings != null)
                 {
@@ -146,7 +170,6 @@ namespace ExportStatsSupermarketTogether
                         var campoPath = defaultSettingsInstance.GetType().GetField("path", BindingFlags.Public | BindingFlags.Instance);
                         string caminhoDoSave = campoPath?.GetValue(defaultSettingsInstance) as string;
 
-                        // Se o caminho contiver algo como "StoreFile1.es3", extraímos o número
                         if (!string.IsNullOrEmpty(caminhoDoSave))
                         {
                             foreach (char c in caminhoDoSave)
@@ -154,7 +177,6 @@ namespace ExportStatsSupermarketTogether
                                 if (char.IsDigit(c))
                                 {
                                     int slotDescoberto = int.Parse(c.ToString());
-                                    // Validação para garantir que o slot faça sentido no jogo (geralmente slots de 1 a 4)
                                     if (slotDescoberto >= 0 && slotDescoberto <= 9) return slotDescoberto;
                                 }
                             }
@@ -162,7 +184,7 @@ namespace ExportStatsSupermarketTogether
                     }
                 }
 
-                // Fallback secundário caso o ES3 esteja mascarado
+                // 3. Terceira opção: Tenta ler do SaveManager físico nativo
                 Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
                 object saveInstance = tipoSaveManager?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
                 if (saveInstance != null)
@@ -172,7 +194,8 @@ namespace ExportStatsSupermarketTogether
                 }
             }
             catch { }
-            return 1; // Se falhar por completo, assume Slot 1 para não perder o log
+            
+            return 0; // 🚨 MUDANÇA: O fallback padrão agora é o Slot 0 para evitar o erro do Slot 3 fantasma!
         }
 
         private Dictionary<string, string> ColetarEMatematizarDados(Type tipoStats, object instance)
@@ -241,7 +264,7 @@ namespace ExportStatsSupermarketTogether
                         float custoRealCalculado = qtdComprada * precoCustoItem;
 
                         sbVendidos.Append(qtdVendida + (i < listaVendidos.Count - 1 ? "," : ""));
-                        sbComprados.Append(qtdComprada + (i < listaVendidos.Count - 1 ? "," : ""));
+                        sbComprados.Append(qtdComprada + (i < listaComprados.Count - 1 ? "," : ""));
                         
                         sbReceitaReal.Append(receitaRealCalculada.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + (i < listaVendidos.Count - 1 ? "," : ""));
                         sbCustoReal.Append(custoRealCalculado.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + (i < listaVendidos.Count - 1 ? "," : ""));
@@ -338,7 +361,6 @@ namespace ExportStatsSupermarketTogether
                 string[] linhas = json.Split(new[] { "\"Dia_" }, StringSplitOptions.None);
                 for (int i = 1; i < linhas.Length; i++)
                 {
-                    string blocoDia = json.Split(new[] { "\"Dia_" + i + "\":" }, StringSplitOptions.None).Length > 1 ? json.Split(new[] { "\"Dia_" + i + "\":" }, StringSplitOptions.None)[1] : linhas[i];
                     string numDiaStr = linhas[i].Split('"')[0];
                     int numDia = int.Parse(numDiaStr);
 
