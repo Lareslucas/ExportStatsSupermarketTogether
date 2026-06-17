@@ -24,7 +24,7 @@ namespace ExportStatsSupermarketTogether
             {
                 var harmony = new Harmony("com.lucas.supermarket.exportstats");
                 harmony.PatchAll();
-                Logger.LogInfo("=== BANCO DE DADOS EXTERNO INICIALIZADO (MODO BUFFER DE PERSISTÊNCIA ES3) ===");
+                Logger.LogInfo("=== BANCO DE DADOS EXTERNO INICIALIZADO (MODO CACHE DE PERSISTÊNCIA CORRIGIDO) ===");
             }
             catch (Exception ex)
             {
@@ -96,7 +96,7 @@ namespace ExportStatsSupermarketTogether
                     diaAtual -= 1;
                 }
 
-                // ANALISE DE BUFFER: Descobre o slot ativo inspecionando as chaves de gravação do Easy Save na RAM
+                // ANALISE DE BUFFER CORRIGIDA: Extrai de forma certeira a propriedade de rota do EasySave
                 int slotAtivo = ObterSlotPeloBufferDoEasySave();
 
                 string pastaBackupMod = Path.Combine(Paths.PluginPath, "ExportStatsSupermarketTogether", "BackupStats");
@@ -107,7 +107,7 @@ namespace ExportStatsSupermarketTogether
 
                 GravarNoBancoDeDadosJson(rotaJsonMetricas, slotAtivo, diaAtual, dadosProntos);
                 
-                Logger.LogInfo($"[Sucesso] Banco de dados atualizado. Slot Detectado via Buffer: {slotAtivo} | Registro do Dia {diaAtual} guardado.");
+                Logger.LogInfo($"[Sucesso] Banco de dados atualizado. Slot Detectado: {slotAtivo} | Registro do Dia {diaAtual} guardado.");
             }
             catch (Exception ex)
             {
@@ -134,18 +134,18 @@ namespace ExportStatsSupermarketTogether
         {
             try
             {
-                // Busca a classe de configuração nativa do motor de salvamento Easy Save 3
                 Type tipoES3Settings = Type.GetType("ES3Settings, Assembly-CSharp-firstpass") ?? Type.GetType("ES3Settings, Assembly-CSharp");
                 if (tipoES3Settings != null)
                 {
+                    // Correção 1: 'defaultSettings' é uma propriedade estática global
                     var propriedadeDefault = tipoES3Settings.GetProperty("defaultSettings", BindingFlags.Public | BindingFlags.Static);
                     object defaultSettingsInstance = propriedadeDefault?.GetValue(null);
 
                     if (defaultSettingsInstance != null)
                     {
-                        // Lê o campo 'path' que indica qual arquivo está atrelado ao buffer ativo na RAM
-                        var campoPath = defaultSettingsInstance.GetType().GetField("path", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                        string caminhoDoSave = campoPath?.GetValue(defaultSettingsInstance) as string;
+                        // Correção 2: 'path' é uma PROPRIEDADE (GetProperty) pública de instância, não um campo (GetField)
+                        var propriedadePath = defaultSettingsInstance.GetType().GetProperty("path", BindingFlags.Public | BindingFlags.Instance);
+                        string caminhoDoSave = propriedadePath?.GetValue(defaultSettingsInstance, null) as string;
 
                         if (!string.IsNullOrEmpty(caminhoDoSave))
                         {
@@ -160,37 +160,10 @@ namespace ExportStatsSupermarketTogether
                         }
                     }
                 }
-
-                // Verificação Dinâmica Secundária: Vasculha instâncias de buffers criadas na RAM pelo compilador do jogo
-                Type tipoES3 = Type.GetType("ES3, Assembly-CSharp-firstpass") ?? Type.GetType("ES3, Assembly-CSharp");
-                if (tipoES3 != null)
-                {
-                    // Tenta rastrear assinaturas de buffers de gravação em execução na RAM
-                    MethodInfo[] metodos = tipoES3.GetMethods(BindingFlags.Public | BindingFlags.Static);
-                    foreach (var metodo in metodos)
-                    {
-                        if (metodo.Name == "GetKeys" || metodo.Name == "GetFiles")
-                        {
-                            ParameterInfo[] parametros = metodo.GetParameters();
-                            if (parametros.Length > 0 && parametros[0].ParameterType == typeof(string))
-                            {
-                                // O Easy Save armazena a rota de cache/buffer internamente aqui
-                                string rotaCache = metodo.Invoke(null, new object[] { "" }) as string;
-                                if (!string.IsNullOrEmpty(rotaCache))
-                                {
-                                    foreach (char c in rotaCache)
-                                    {
-                                        if (char.IsDigit(c)) return int.Parse(c.ToString());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
             catch { }
 
-            return 0; // Fallback seguro (Slot 0) se nenhuma rota for encontrada no buffer profundo
+            return 0; // Fallback padrão estruturado
         }
 
         private Dictionary<string, string> ColetarEMatematizarDados(Type tipoStats, object instance)
@@ -353,21 +326,23 @@ namespace ExportStatsSupermarketTogether
             var resultado = new Dictionary<string, Dictionary<string, object>>();
             try
             {
-                string[] linhas = json.Split(new[] { "\"Dia_" }, StringSplitOptions.None);
-                for (int i = 1; i < linhas.Length; i++)
+                // Correção 3: Desserializador linear robusto imune a pulos de dias (ex: Dia 6 para Dia 57)
+                string[] blocosCorte = json.Split(new[] { "\"Dia_" }, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 1; i < blocosCorte.Length; i++)
                 {
-                    string numDiaStr = linhas[i].Split('"')[0];
+                    string trecho = blocosCorte[i];
+                    string numDiaStr = trecho.Split('"')[0];
                     int numDia = int.Parse(numDiaStr);
 
                     var dadosDia = new Dictionary<string, object>();
-                    string[] campos = linhas[i].Split('\n');
-                    foreach (var campo in campos)
+                    string[] linhas = trecho.Split('\n');
+                    foreach (var linha in linhas)
                     {
-                        if (campo.Contains(":") && !campo.Contains("{") && !campo.Contains("}"))
+                        if (linha.Contains(":") && !linha.Contains("{") && !linha.Contains("}"))
                         {
-                            string[] partes = campo.Split(new[] { ':' }, 2);
+                            string[] partes = linha.Split(new[] { ':' }, 2);
                             string chave = partes[0].Replace("\"", "").Trim();
-                            string valor = partes[partes.Length - 1].Trim().TrimEnd(',');
+                            string valor = partes[1].Trim().TrimEnd(',');
                             dadosDia[chave] = valor;
                         }
                     }
