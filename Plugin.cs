@@ -15,9 +15,6 @@ namespace ExportStatsSupermarketTogether
     {
         private static ExportStatsPlugin Instance;
         private float ultimoTempoAutoSaveConhecido = -1f;
-        
-        // Guarda o Slot real capturado no carregamento
-        private static int SlotIdentificadoNoCarregamento = -1;
 
         private void Awake()
         {
@@ -26,27 +23,8 @@ namespace ExportStatsSupermarketTogether
             try
             {
                 var harmony = new Harmony("com.lucas.supermarket.exportstats");
-                
-                // Aplica os ganchos padrões do arquivo automaticamente
                 harmony.PatchAll();
-
-                // 🚨 GANCHO DINÂMICO AUTOMÁTICO: Localiza e intercepta o SaveManager sem quebrar o compilador
-                Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
-                if (tipoSaveManager != null)
-                {
-                    MethodInfo metodoLoad = tipoSaveManager.GetMethod("LoadGame", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-                    MethodInfo metodoSetSlot = tipoSaveManager.GetMethod("SetCurrentSlot", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-                    
-                    MethodInfo prefixoGenerico = typeof(ExportStatsPlugin).GetMethod(nameof(CapturarSlotDoSaveManager), BindingFlags.NonPublic | BindingFlags.Static);
-
-                    if (metodoLoad != null && prefixoGenerico != null)
-                        harmony.Patch(metodoLoad, prefix: new HarmonyMethod(prefixoGenerico));
-                        
-                    if (metodoSetSlot != null && prefixoGenerico != null)
-                        harmony.Patch(metodoSetSlot, prefix: new HarmonyMethod(prefixoGenerico));
-                }
-
-                Logger.LogInfo("=== BANCO DE DADOS EXTERNO INICIALIZADO (MODO APENAS LEITURA ATIVO) ===");
+                Logger.LogInfo("=== BANCO DE DADOS EXTERNO INICIALIZADO (MODO REFLEXÃO DE SLOT ATIVO) ===");
             }
             catch (Exception ex)
             {
@@ -54,32 +32,20 @@ namespace ExportStatsSupermarketTogether
             }
         }
 
-        // Método que recebe o primeiro argumento numérico enviado pelo jogo (seja o slotIndex ou slot)
-        private static void CapturarSlotDoSaveManager(object[] __args)
-        {
-            try
-            {
-                if (__args != null && __args.Length > 0)
-                {
-                    int slotDetectado = Convert.ToInt32(__args[0]);
-                    SlotIdentificadoNoCarregamento = slotDetectado;
-                    Instance?.Logger.LogInfo($"[Gatilho Dinâmico] Slot interceptado com sucesso na RAM: {slotDetectado}");
-                }
-            }
-            catch { }
-        }
-
         private void Update()
         {
+            // 1. Gatilho Manual (Teclado F10)
             if (Input.GetKeyDown(KeyCode.F10))
             {
                 Logger.LogInfo("[F10] Disparando captura manual para o Banco de Dados...");
                 ExecutarFluxoDeCapturaGeral(false);
             }
 
+            // 2. Gatilho Sombra (Sincronização com o Auto-save do Jogo)
             VerificarSincroniaAutoSaveJogo();
         }
 
+        // 3. Gatilho de Fim de Dia
         [HarmonyPatch(typeof(StatisticsManager), "SaveStatistics")]
         [HarmonyPostfix]
         public static void Postfix_SaveStatistics()
@@ -130,7 +96,8 @@ namespace ExportStatsSupermarketTogether
                     diaAtual -= 1;
                 }
 
-                int slotAtivo = ObterSlotRealDinamico();
+                // Captura o Slot de forma precisa quebrando a String do save ativo na RAM
+                int slotAtivo = ExtrairSlotAtivoDaMemoriaInterna();
 
                 string pastaBackupMod = Path.Combine(Paths.PluginPath, "ExportStatsSupermarketTogether", "BackupStats");
                 if (!Directory.Exists(pastaBackupMod)) Directory.CreateDirectory(pastaBackupMod);
@@ -140,7 +107,7 @@ namespace ExportStatsSupermarketTogether
 
                 GravarNoBancoDeDadosJson(rotaJsonMetricas, slotAtivo, diaAtual, dadosProntos);
                 
-                Logger.LogInfo($"[Sucesso] Banco de dados updated. Slot {slotAtivo} | Registro do Dia {diaAtual} guardado.");
+                Logger.LogInfo($"[Sucesso] Banco de dados atualizado. Slot Detectado: {slotAtivo} | Registro do Dia {diaAtual} guardado.");
             }
             catch (Exception ex)
             {
@@ -163,15 +130,36 @@ namespace ExportStatsSupermarketTogether
             catch { return -1; }
         }
 
-        private int ObterSlotRealDinamico()
+        private int ExtrairSlotAtivoDaMemoriaInterna()
         {
-            if (SlotIdentificadoNoCarregamento != -1)
-            {
-                return SlotIdentificadoNoCarregamento;
-            }
-
             try
             {
+                // Localiza a classe de verificação de arquivos que descobrimos no Scanner automático
+                Type tipoCheckSave = Type.GetType("CheckIfAutosaveExists, Assembly-CSharp");
+                if (tipoCheckSave != null)
+                {
+                    object instanceCheck = GameObject.FindObjectOfType(tipoCheckSave);
+                    if (instanceCheck != null)
+                    {
+                        // Lê a String textual 'savefile' direto da RAM (Ex: "StoreFile0.es3")
+                        var campoSaveFile = tipoCheckSave.GetField("savefile", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+                        string textoDoSave = campoSaveFile?.GetValue(instanceCheck) as string;
+
+                        if (!string.IsNullOrEmpty(textoDoSave))
+                        {
+                            foreach (char c in textoDoSave)
+                            {
+                                if (char.IsDigit(c))
+                                {
+                                    int numeroExtraido = int.Parse(c.ToString());
+                                    if (numeroExtraido >= 0 && numeroExtraido <= 9) return numeroExtraido;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fallback secundário de reflexão pelo EasySave caso a UI seja destruída completamente
                 Type tipoES3Settings = Type.GetType("ES3Settings, Assembly-CSharp-firstpass") ?? Type.GetType("ES3Settings, Assembly-CSharp");
                 if (tipoES3Settings != null)
                 {
@@ -196,18 +184,10 @@ namespace ExportStatsSupermarketTogether
                         }
                     }
                 }
-
-                Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
-                object saveInstance = tipoSaveManager?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-                if (saveInstance != null)
-                {
-                    var campoSlotManager = saveInstance.GetType().GetField("currentSlot", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (campoSlotManager != null) return Convert.ToInt32(campoSlotManager.GetValue(saveInstance));
-                }
             }
             catch { }
-            
-            return 0; // Fallback padrão agora é o Slot 0
+
+            return 0; // Fallback padrão agora é o Slot 0 de segurança
         }
 
         private Dictionary<string, string> ColetarEMatematizarDados(Type tipoStats, object instance)
@@ -279,7 +259,7 @@ namespace ExportStatsSupermarketTogether
                         sbComprados.Append(qtdComprada + (i < listaComprados.Count - 1 ? "," : ""));
                         
                         sbReceitaReal.Append(receitaRealCalculada.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + (i < listaVendidos.Count - 1 ? "," : ""));
-                        sbCustoReal.Append(custoRealCalculado.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + (i < listaVendidos.Count - 1 ? "," : ""));
+                        sbCustoReal.Append(custoRealCalculado.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + (i < listaComprados.Count - 1 ? "," : ""));
                     }
                 }
 
@@ -384,7 +364,7 @@ namespace ExportStatsSupermarketTogether
                         {
                             string[] partes = campo.Split(new[] { ':' }, 2);
                             string chave = partes[0].Replace("\"", "").Trim();
-                            string valor = partes[1].Trim().TrimEnd(',');
+                            string valor = partes[partes.Length - 1].Trim().TrimEnd(',');
                             dadosDia[chave] = valor;
                         }
                     }
