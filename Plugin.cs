@@ -34,18 +34,18 @@ namespace ExportStatsSupermarketTogether
 
         private void Update()
         {
-            // 1. Gatilho Manual: Tecla F10
+            // 1. Gatilho Manual (Teclado F10)
             if (Input.GetKeyDown(KeyCode.F10))
             {
                 Logger.LogInfo("[F10] Disparando captura manual para o Banco de Dados...");
                 ExecutarFluxoDeCapturaGeral(false);
             }
 
-            // 2. Gatilho Sombra: Sincronização em tempo real com o Auto-Save do Jogo
+            // 2. Gatilho Sombra (Monitoramento do Auto-save nativo do Jogo)
             VerificarSincroniaAutoSaveJogo();
         }
 
-        // 3. Gatilho de Fim de Dia: Intercepta a virada de página do relatório do jogo
+        // 3. Gatilho de Fim de Dia
         [HarmonyPatch(typeof(StatisticsManager), "SaveStatistics")]
         [HarmonyPostfix]
         public static void Postfix_SaveStatistics()
@@ -69,7 +69,6 @@ namespace ExportStatsSupermarketTogether
 
                 float tempoAtualAutoSave = Convert.ToSingle(campoAutoSave.GetValue(gameDataInstance));
 
-                // Se o tempo atual for maior que o anterior, significa que o jogo acabou de resetar o cronômetro (Auto-save rodou!)
                 if (ultimoTempoAutoSaveConhecido != -1f && tempoAtualAutoSave > ultimoTempoAutoSaveConhecido)
                 {
                     Logger.LogInfo("[Sincronia Sombra] Auto-save do jogo detectado! Sincronizando banco de dados externo imediatamente...");
@@ -78,44 +77,37 @@ namespace ExportStatsSupermarketTogether
 
                 ultimoTempoAutoSaveConhecido = tempoAtualAutoSave;
             }
-            catch { // Silencioso no Update para não poluir a tela
-            }
+            catch { }
         }
 
         private void ExecutarFluxoDeCapturaGeral(bool ehFimDeDia)
         {
             try
             {
-                // Localiza o StatisticsManager na RAM
                 Type tipoStats = Type.GetType("StatisticsManager, Assembly-CSharp");
                 object statsInstance = tipoStats?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
                 if (statsInstance == null) return;
 
-                // Captura o dia atual da gameplay ativa
                 int diaAtual = ObterDiaAtualDaSessao();
                 if (diaAtual <= 0) return;
 
-                // Correção de Ponteiro: Se for fim de dia e o jogo pulou o dia prematuramente, recuamos 1 dia para salvar na gaveta certa
                 if (ehFimDeDia && diaAtual > 1)
                 {
                     diaAtual -= 1;
                 }
 
-                // Captura o slot ativo do save (0 a 4)
-                int slotAtivo = ObterSlotSaveAtivo();
+                // Captura o Slot extraindo direto do arquivo que o motor de save está usando
+                int slotAtivo = ObterSlotPeloArquivoDeSaveReal();
 
-                // Define a rota limpa do arquivo .json na pasta do mod
                 string pastaBackupMod = Path.Combine(Paths.PluginPath, "ExportStatsSupermarketTogether", "BackupStats");
                 if (!Directory.Exists(pastaBackupMod)) Directory.CreateDirectory(pastaBackupMod);
                 string rotaJsonMetricas = Path.Combine(pastaBackupMod, $"Backup_StoreFile{slotAtivo}stats.json");
 
-                // Coleta todos os dados nativos e processa a correção matemática dos centavos
                 Dictionary<string, string> dadosProntos = ColetarEMatematizarDados(tipoStats, statsInstance);
 
-                // Grava de forma cumulativa sem apagar os dias anteriores
                 GravarNoBancoDeDadosJson(rotaJsonMetricas, slotAtivo, diaAtual, dadosProntos);
                 
-                Logger.LogInfo($"[Sucesso] Banco de dados atualizado. Registro do Dia {diaAtual} guardado com precisão.");
+                Logger.LogInfo($"[Sucesso] Banco de dados atualizado. Slot {slotAtivo} | Registro do Dia {diaAtual} guardado com precisão.");
             }
             catch (Exception ex)
             {
@@ -138,22 +130,55 @@ namespace ExportStatsSupermarketTogether
             catch { return -1; }
         }
 
-        private int ObterSlotSaveAtivo()
+        private int ObterSlotPeloArquivoDeSaveReal()
         {
             try
             {
+                // Acessa as configurações globais do Easy Save (ES3) que controlam o arquivo ativo
+                Type tipoES3Settings = Type.GetType("ES3Settings, Assembly-CSharp-firstpass") ?? Type.GetType("ES3Settings, Assembly-CSharp");
+                if (tipoES3Settings != null)
+                {
+                    var propriedadeDefault = tipoES3Settings.GetProperty("defaultSettings", BindingFlags.Public | BindingFlags.Static);
+                    object defaultSettingsInstance = propriedadeDefault?.GetValue(null);
+
+                    if (defaultSettingsInstance != null)
+                    {
+                        var campoPath = defaultSettingsInstance.GetType().GetField("path", BindingFlags.Public | BindingFlags.Instance);
+                        string caminhoDoSave = campoPath?.GetValue(defaultSettingsInstance) as string;
+
+                        // Se o caminho contiver algo como "StoreFile1.es3", extraímos o número
+                        if (!string.IsNullOrEmpty(caminhoDoSave))
+                        {
+                            foreach (char c in caminhoDoSave)
+                            {
+                                if (char.IsDigit(c))
+                                {
+                                    int slotDescoberto = int.Parse(c.ToString());
+                                    // Validação para garantir que o slot faça sentido no jogo (geralmente slots de 1 a 4)
+                                    if (slotDescoberto >= 0 && slotDescoberto <= 9) return slotDescoberto;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fallback secundário caso o ES3 esteja mascarado
                 Type tipoSaveManager = Type.GetType("SaveManager, Assembly-CSharp");
                 object saveInstance = tipoSaveManager?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-                return (saveInstance?.GetType().GetField("currentSlot", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(saveInstance) as int?) ?? 3;
+                if (saveInstance != null)
+                {
+                    var campoSlotManager = saveInstance.GetType().GetField("currentSlot", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (campoSlotManager != null) return Convert.ToInt32(campoSlotManager.GetValue(saveInstance));
+                }
             }
-            catch { return 3; }
+            catch { }
+            return 1; // Se falhar por completo, assume Slot 1 para não perder o log
         }
 
         private Dictionary<string, string> ColetarEMatematizarDados(Type tipoStats, object instance)
         {
             Dictionary<string, string> dict = new Dictionary<string, string>();
             
-            // 1. Variáveis Gerais Nativas
             string[] camposSimples = {
                 "customers", "benefits", "franchiseExperience", "timesRobbed", "moneySpentOnProducts",
                 "notFoundProductsCount", "tooExpensiveProductsCount", "lightCost", "rentCost", "employeesCost",
@@ -170,7 +195,6 @@ namespace ExportStatsSupermarketTogether
                 dict[nomeCampo] = campo?.GetValue(instance)?.ToString() ?? "0";
             }
 
-            // 2. CORREÇÃO DOS CENTAVOS (Listas de Produtos de Alta Precisão)
             ProcessarListasComCentavosReais(tipoStats, instance, dict);
 
             return dict;
@@ -180,11 +204,9 @@ namespace ExportStatsSupermarketTogether
         {
             try
             {
-                // Extrai as listas nativas de quantidades do jogo
                 var listaVendidos = tipoStats.GetField("productsSoldList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(statsInstance) as IList;
                 var listaComprados = tipoStats.GetField("productsAcquiredList", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(statsInstance) as IList;
 
-                // Localiza a tabela de preços do jogo (Market ou ProductManager dependendo da build)
                 Type tipoProductManager = Type.GetType("ProductManager, Assembly-CSharp") ?? Type.GetType("MarketManager, Assembly-CSharp");
                 object pmInstance = tipoProductManager?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
 
@@ -195,7 +217,6 @@ namespace ExportStatsSupermarketTogether
 
                 if (listaVendidos != null && pmInstance != null)
                 {
-                    // O jogo possui uma lista dinâmica de preços reais do tipo float/decimal indexada por ID de produto
                     var campoPrecosVenda = pmInstance.GetType().GetField("productPrices", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance) 
                                         ?? pmInstance.GetType().GetField("prices", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                     
@@ -213,18 +234,15 @@ namespace ExportStatsSupermarketTogether
                         float precoVendaItem = 1.0f;
                         float precoCustoItem = 1.0f;
 
-                        // Puxa o preço real flutuante da RAM com os centavos
                         if (tabelaPrecos != null && i < tabelaPrecos.Count) precoVendaItem = Convert.ToSingle(tabelaPrecos[i]);
                         if (tabelaCost != null && i < tabelaCost.Count) precoCustoItem = Convert.ToSingle(tabelaCost[i]);
 
-                        // Executa a multiplicação matemática corrigindo o erro do jogo
                         float receitaRealCalculada = qtdVendida * precoVendaItem;
                         float custoRealCalculado = qtdComprada * precoCustoItem;
 
                         sbVendidos.Append(qtdVendida + (i < listaVendidos.Count - 1 ? "," : ""));
                         sbComprados.Append(qtdComprada + (i < listaVendidos.Count - 1 ? "," : ""));
                         
-                        // Injeta os valores corretos com string formatada em ponto flutuante americano para o Excel ler
                         sbReceitaReal.Append(receitaRealCalculada.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + (i < listaVendidos.Count - 1 ? "," : ""));
                         sbCustoReal.Append(custoRealCalculado.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + (i < listaVendidos.Count - 1 ? "," : ""));
                     }
@@ -251,7 +269,6 @@ namespace ExportStatsSupermarketTogether
         {
             Dictionary<string, Dictionary<string, object>> bancoCompleto = new Dictionary<string, Dictionary<string, object>>();
 
-            // Se o arquivo já existir, carrega ele para a memória para fazer o Append
             if (File.Exists(rota))
             {
                 try
@@ -264,13 +281,12 @@ namespace ExportStatsSupermarketTogether
                 }
             }
 
-            // Monta o bloco do dia atual
             Dictionary<string, object> blocoDia = new Dictionary<string, object>();
-            blocoDia["Ultima_Atualizacao"] = DateTime.Now.MakeValue(DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+            blocoDia["Ultima_Atualizacao"] = $"\"{DateTime.Now:dd/MM/yyyy HH:mm:ss}\"";
 
             foreach (var par in dadosDia)
             {
-                if (par.Value.StartsWith("[")) // Identifica se é uma lista para injetar sem aspas textuais
+                if (par.Value.StartsWith("["))
                 {
                     blocoDia[par.Key] = par.Value;
                 }
@@ -280,10 +296,8 @@ namespace ExportStatsSupermarketTogether
                 }
             }
 
-            // Aloca o dia na gaveta correta da Linha do Tempo (Garante a ordem cronológica linear)
             bancoCompleto[$"Dia_{dia}"] = blocoDia;
 
-            // Transforma o dicionário inteiro em um arquivo JSON identado e limpo
             StringBuilder jsonFinal = new StringBuilder();
             jsonFinal.AppendLine("{");
             jsonFinal.AppendLine($"  \"Supermercado_Save_Slot\": {slot},");
@@ -316,7 +330,6 @@ namespace ExportStatsSupermarketTogether
             File.WriteAllText(rota, jsonFinal.ToString(), Encoding.UTF8);
         }
 
-        // Deserializador leve nativo para não exigir dependência de DLLs de terceiros no GitHub
         private Dictionary<string, Dictionary<string, object>> DeserializarJsonSimples(string json)
         {
             var resultado = new Dictionary<string, Dictionary<string, object>>();
@@ -325,12 +338,12 @@ namespace ExportStatsSupermarketTogether
                 string[] linhas = json.Split(new[] { "\"Dia_" }, StringSplitOptions.None);
                 for (int i = 1; i < linhas.Length; i++)
                 {
-                    string blocoDia = linhas[i];
-                    string numDiaStr = blocoDia.Split('"')[0];
+                    string blocoDia = json.Split(new[] { "\"Dia_" + i + "\":" }, StringSplitOptions.None).Length > 1 ? json.Split(new[] { "\"Dia_" + i + "\":" }, StringSplitOptions.None)[1] : linhas[i];
+                    string numDiaStr = linhas[i].Split('"')[0];
                     int numDia = int.Parse(numDiaStr);
 
                     var dadosDia = new Dictionary<string, object>();
-                    string[] campos = blocoDia.Split('\n');
+                    string[] campos = linhas[i].Split('\n');
                     foreach (var campo in campos)
                     {
                         if (campo.Contains(":") && !campo.Contains("{") && !campo.Contains("}"))
@@ -347,9 +360,5 @@ namespace ExportStatsSupermarketTogether
             catch {}
             return resultado;
         }
-    }
-
-    public static class ExtensionHelper {
-        public static string MakeValue(this DateTime dt, string val) => $"\"{val}\"";
     }
 }
